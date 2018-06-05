@@ -10,7 +10,9 @@ union nuint64_t {
 };
 
 
-constexpr uint64_t BUF_SIZE = 1000;
+constexpr int STDIN = 0;
+constexpr int STDOUT = 1;
+constexpr uint64_t BUF_SIZE = 10000;
 constexpr char NULL_TERMINATOR = '\0';
 constexpr char EOL = '\n';
 constexpr short DOTTED_ADDR_SIZE = 19;

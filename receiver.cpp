@@ -34,6 +34,7 @@ uint16_t CTRL_PORT;
 uint16_t DATA_PORT;
 uint64_t PSIZE;
 uint64_t BSIZE;
+uint64_t RTIME;
 uint64_t MAX_PACKAGES_NO;
 char* MCAST_ADDR;
 char* dADDR;
@@ -67,10 +68,11 @@ int64_t package_pos(uint64_t fbyte) {
 void init() {
   MCAST_ADDR = const_cast<char *>("239.10.11.12");
   dADDR = const_cast<char *>("255.255.255.255");
+  RTIME = 250;
   CTRL_PORT = 37075;
   DATA_PORT = 27075;
-  PSIZE = 10;
-  BSIZE = 80;
+  PSIZE = 512;// 10;
+  BSIZE = 65536; //80;
   MAX_PACKAGES_NO = BSIZE / PSIZE;
   connected = false;
   transmitters = nullptr;
@@ -222,7 +224,7 @@ void dsend_retransmition_requests() {
   request[request.size() - 1] = NULL_TERMINATOR; /* delete last coma */
   dremote_addr_len = sizeof(dremote_addr);
   flags = 0;
-  printf("%s\n", request.c_str());
+  //printf("%s\n", request.c_str());
   snd_len = sendto(dsock, request.c_str(), request.size(), flags, (const struct sockaddr *) &dremote_addr,
                    dremote_addr_len);
   if (snd_len != request.size()) {
@@ -265,11 +267,11 @@ void discover() {
 
   while (true) {
     //dsend_lookup();
-    dreceive_replies();
+    //dreceive_replies();
     if (connected) {
       dsend_retransmition_requests();
     }
-    sleep(1);
+    usleep(RTIME);
     //dremove_unused_transmitters();
   }
 }
@@ -332,7 +334,7 @@ void rset_capturing_details() {
   tmp.nuint32[1] = ntohl(tmp.nuint32[1]);
   byte_zero = tmp.nuint64;
 
-  printf("\nSETTING: %ld\n", byte_zero);
+  //printf("\nSETTING: %ld\n", byte_zero);
 
   bbyte = byte_zero;
   pexp_byte = byte_zero + PSIZE;
@@ -392,7 +394,7 @@ void rstart_capturing() {
       memcpy(tmp_fbyte.nuint8, &message[sizeof(uint64_t)], sizeof(uint64_t));
       tmp_fbyte.nuint32[0] = ntohl(tmp_fbyte.nuint32[0]);
       tmp_fbyte.nuint32[1] = ntohl(tmp_fbyte.nuint32[1]);
-      printf("R: received (fbyte=%ld, sid=%ld)\n", tmp_fbyte.nuint64, tmp_sid.nuint64);
+
       if (tmp_sid.nuint64 < session_id || tmp_fbyte.nuint64 < pexp_byte) {
         continue;
       } else if (tmp_sid.nuint64 > session_id) {
@@ -404,9 +406,7 @@ void rstart_capturing() {
 
       package.sid = tmp_sid.nuint64;
       package.fbyte = tmp_fbyte.nuint64;
-
-      printf("received: %ld\n", package.fbyte);
-
+      memcpy(package.data, &message[AUDIO_DATA], PSIZE);
 
       if (package.fbyte > bbyte) {
         bbyte = package.fbyte;
@@ -420,13 +420,11 @@ void rstart_capturing() {
       fprintf(stderr, "recvfrom receiver socket");
     }
 
-    debug_print_packages();
-
     if (play) {
       if (rhole_in_data()) {
         return;
       } else {
-        printf("playing: %ld\n", pexp_byte);
+        write(STDOUT, packages[package_pos(pexp_byte)].data, PSIZE);
         pexp_byte += PSIZE;
       }
     }

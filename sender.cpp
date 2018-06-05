@@ -10,7 +10,9 @@
 #include <arpa/inet.h>
 #include <cassert>
 #include <zconf.h>
+#include <unistd.h>
 #include <thread>
+#include <mutex>
 #include "helper.h"
 
 
@@ -41,12 +43,15 @@ nuint64_t SESSION_ID;
 /* shared */
 std::vector<package_t> packages;
 nuint64_t read_bytes;
+bool data_left;
+
+int tsock;
+std::mutex tsock_mut;
 
 /* controler */
 int csock;
 
 /* transmitter */
-int tsock;
 sockaddr_in multicast_addr;
 
 
@@ -64,14 +69,34 @@ int64_t package_pos(uint64_t fbyte) {
   return pos;
 }
 
+void send_package(package_t& package) {
+  int flags;
+  socklen_t multicast_address_len;
+  ssize_t snd_len;
+
+  flags = 0;
+  multicast_address_len = sizeof(multicast_addr);
+
+  //if (time(nullptr) % 3 == 0) return; /* simulating data lose */
+
+  snd_len = sendto(tsock, package.data, PSIZE + AUDIO_DATA + 1, flags,
+                   (const struct sockaddr *) &multicast_addr, multicast_address_len);
+  if (snd_len != PSIZE + AUDIO_DATA + 1) {
+    fprintf(stderr, "sendto multicaster");
+  }
+
+  package.retransmit = false;
+}
+
 void init() {
+  data_left = true;
   SNAME = const_cast<char *>("Radio Pruszkow");
   MCAST_ADDR = const_cast<char *>("239.10.11.12");
   DATA_PORT = 27075;
   CTRL_PORT = 37075;
   RTIME = 250;
-  FSIZE = 50;
-  PSIZE = 10;
+  FSIZE = 131072; //50;
+  PSIZE = 512;
   MAX_PACKAGES_NO = FSIZE / PSIZE;
   SESSION_ID.nuint64 = static_cast<uint64_t>(time(nullptr));
   read_bytes.nuint64 = 0;
@@ -211,7 +236,34 @@ void controler() {
     memset(buff, 0, BUF_SIZE + 1);
     order = cread_order(rec_addr, buff);
     cperform_order(order, buff, rec_addr);
-    sleep(1);
+  }
+}
+
+/* -------------------------------------------------------------------------------------------------------------------*
+ *                                                  RETRANSMITTER                                                     *
+ *--------------------------------------------------------------------------------------------------------------------*/
+void retransmit() {
+  int64_t ptr, head;
+
+  tsock_mut.lock();
+
+  head = package_pos(read_bytes.nuint64);
+  ptr = next(1, head, MAX_PACKAGES_NO);
+
+  while (ptr != head) {
+    if (packages[ptr].retransmit) {
+      send_package(packages[ptr]);
+    }
+    ptr = next(1, ptr, MAX_PACKAGES_NO);
+  }
+
+  tsock_mut.unlock();
+}
+
+void retransmitter() {
+  while (data_left) {
+    retransmit();
+    usleep(static_cast<__useconds_t>(RTIME));
   }
 }
 
@@ -234,46 +286,28 @@ void tinit() {
   }
 }
 
-void tsend_package(package_t& package) {
-  int flags;
-  socklen_t multicast_address_len;
-  ssize_t snd_len;
-
-  flags = 0;
-  multicast_address_len = sizeof(multicast_addr);
-
-  //if (time(nullptr) % 3 == 0) return; /* simulating data lose */
-
-  snd_len = sendto(tsock, package.data, PSIZE + AUDIO_DATA + 1, flags,
-                   (const struct sockaddr *) &multicast_addr, multicast_address_len);
-  if (snd_len != PSIZE + AUDIO_DATA + 1) {
-    fprintf(stderr, "sendto multicaster");
-  }
-
-  package.retransmit = false;
-}
-
 bool tread_from_stdin() {
-  char* res;
-  size_t rcv_bytes;
   nuint64_t tmp{};
   int64_t pos;
+  int c;
+
+  tsock_mut.lock();
 
   pos = package_pos(read_bytes.nuint64 + PSIZE);
   package_t& package = packages[pos];
-  rcv_bytes = 0;
 
   memset(package.data, 0, PSIZE + AUDIO_DATA + 1);
   package.fbyte = 0; /* anyway we override the act data, which in
                         case of failure we don't want to retransmit */
 
-  do {
-    res = fgets(&package.data[rcv_bytes + AUDIO_DATA], (int) (PSIZE + 1 - rcv_bytes), stdin);
-    rcv_bytes = strlen(&package.data[AUDIO_DATA]);
-  } while (res && (rcv_bytes != PSIZE && package.data[rcv_bytes + AUDIO_DATA - 1] == EOL));
-
-  if (!res || strlen(&package.data[AUDIO_DATA]) != PSIZE) {
-    return false;
+  for (int i = 0; i < PSIZE; ++i) {
+    c = getchar();
+    if (c == EOF) {
+      printf("End of data\n");
+      tsock_mut.unlock();
+      return false;
+    }
+    package.data[AUDIO_DATA + i] = static_cast<char>(c);
   }
 
   memcpy(package.data, SESSION_ID.nuint8, sizeof(SESSION_ID));
@@ -284,43 +318,23 @@ bool tread_from_stdin() {
   package.fbyte = read_bytes.nuint64;
   read_bytes.nuint64 += PSIZE;
 
-  tsend_package(package);
+  send_package(package);
+
+  tsock_mut.unlock();
+
   return true;
 }
 
-void tretransmit() {
-  int64_t ptr, head;
-
-  head = package_pos(read_bytes.nuint64);
-  ptr = next(1, head, MAX_PACKAGES_NO);
-
-  while (ptr != head) {
-    if (packages[ptr].retransmit) {
-      tsend_package(packages[ptr]);
-    }
-    ptr = next(1, ptr, MAX_PACKAGES_NO);
-  }
-}
-
 void transmitter() {
-  bool data_left;
-  unsigned last_retransmit;
-
   tinit();
 
-  data_left = true;
-  last_retransmit = 0;
+  std::thread rthread{retransmitter};
 
   while (data_left) {
     data_left = tread_from_stdin();
-    if (last_retransmit >= RTIME) {
-      tretransmit();
-      last_retransmit = 0;
-    }
-    sleep(TRANSMITTER_NAP);
-    last_retransmit += TRANSMITTER_NAP * 1000;
   }
-  printf("T: finished sending\n");
+
+  rthread.join();
 }
 
 /* -------------------------------------------------------------------------------------------------------------------*
