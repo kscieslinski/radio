@@ -289,6 +289,7 @@ void tinit() {
 bool tread_from_stdin() {
   nuint64_t tmp{};
   int64_t pos;
+  ssize_t rec_bytes;
   int c;
 
   tsock_mut.lock();
@@ -299,16 +300,19 @@ bool tread_from_stdin() {
   memset(package.data, 0, PSIZE + AUDIO_DATA + 1);
   package.fbyte = 0; /* anyway we override the act data, which in
                         case of failure we don't want to retransmit */
-
-  for (int i = 0; i < PSIZE; ++i) {
+  rec_bytes = 0;
+  do {
     c = getchar();
     if (c == EOF) {
       printf("End of data\n");
       tsock_mut.unlock();
       return false;
     }
-    package.data[AUDIO_DATA + i] = static_cast<char>(c);
-  }
+
+    package.data[AUDIO_DATA + rec_bytes] = static_cast<char>(c);
+    rec_bytes++;
+    rec_bytes += read(STDIN, &package.data[AUDIO_DATA + rec_bytes], PSIZE - rec_bytes);
+  } while (rec_bytes != PSIZE);
 
   memcpy(package.data, SESSION_ID.nuint8, sizeof(SESSION_ID));
   tmp.nuint32[0] = htonl(read_bytes.nuint32[0]);
