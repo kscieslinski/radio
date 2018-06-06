@@ -15,9 +15,9 @@ constexpr int STDOUT = 1;
 constexpr uint64_t BUF_SIZE = 10000;
 constexpr char NULL_TERMINATOR = '\0';
 constexpr char EOL = '\n';
-constexpr short DOTTED_ADDR_SIZE = 19;
-constexpr short STATION_MAX_NAME_SIZE = 64;
-constexpr short AUDIO_DATA = 16;
+constexpr int DOTTED_ADDR_SIZE = 19;
+constexpr int STATION_MAX_NAME_SIZE = 64;
+constexpr int AUDIO_DATA = 16;
 
 
 int64_t next(int64_t count, int64_t pos, int64_t total_elements_number);

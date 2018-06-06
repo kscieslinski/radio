@@ -232,7 +232,7 @@ void controler() {
   char buff[BUF_SIZE + 1];
   cinit();
 
-  while (true) {
+  while (data_left) {
     memset(buff, 0, BUF_SIZE + 1);
     order = cread_order(rec_addr, buff);
     cperform_order(order, buff, rec_addr);
@@ -289,7 +289,6 @@ void tinit() {
 bool tread_from_stdin() {
   nuint64_t tmp{};
   int64_t pos;
-  ssize_t rec_bytes;
   int c;
 
   tsock_mut.lock();
@@ -300,8 +299,8 @@ bool tread_from_stdin() {
   memset(package.data, 0, PSIZE + AUDIO_DATA + 1);
   package.fbyte = 0; /* anyway we override the act data, which in
                         case of failure we don't want to retransmit */
-  rec_bytes = 0;
-  do {
+
+  for (int i = 0; i < PSIZE; ++i) {
     c = getchar();
     if (c == EOF) {
       printf("End of data\n");
@@ -309,10 +308,8 @@ bool tread_from_stdin() {
       return false;
     }
 
-    package.data[AUDIO_DATA + rec_bytes] = static_cast<char>(c);
-    rec_bytes++;
-    rec_bytes += read(STDIN, &package.data[AUDIO_DATA + rec_bytes], PSIZE - rec_bytes);
-  } while (rec_bytes != PSIZE);
+    package.data[AUDIO_DATA + i] = static_cast<char>(c);
+  }
 
   memcpy(package.data, SESSION_ID.nuint8, sizeof(SESSION_ID));
   tmp.nuint32[0] = htonl(read_bytes.nuint32[0]);
