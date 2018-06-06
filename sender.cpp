@@ -14,6 +14,8 @@
 #include <thread>
 #include <mutex>
 #include <unordered_set>
+#include <regex>
+
 #include "helper.h"
 
 
@@ -21,6 +23,8 @@ constexpr short LOOKUP_ORD = 1;
 constexpr short REXMIT_ORD = 2;
 constexpr short NO_ORD = 3;
 constexpr short TRANSMITTER_NAP = 1;
+const std::regex lookup_pattern("^ZERO_SEVEN_COME_IN\n$");
+const std::regex rexmit_pattern("^REXMIT (\\d[0-9]*,)*+\\d[0-9]*\n$");
 
 struct package_t {
   uint64_t fbyte;
@@ -34,8 +38,8 @@ uint16_t CTRL_PORT;
 uint64_t PSIZE;
 uint64_t FSIZE;
 uint64_t RTIME;
-char* MCAST_ADDR;
-char* SNAME;
+std::string MCAST_ADDR;
+std::string SNAME;
 
 uint64_t MAX_PACKAGES_NO;
 nuint64_t SESSION_ID;
@@ -154,11 +158,9 @@ int cread_order(sockaddr_in& rec_addr, char* buff) {
 
   buff[rec_bytes] = NULL_TERMINATOR;
 
-  printf("CTRL_SOCK: %.*s from %s\n", (int) rec_bytes, buff, inet_ntoa(rec_addr.sin_addr));
-
-  if (strcmp(buff, "LOOKUP") == 0) {
+  if (std::regex_match(buff, lookup_pattern)) {
     return LOOKUP_ORD;
-  } else if (strncmp(buff, "LOUDER_PLEASE", strlen("LOUDER_PLEASE")) == 0) {
+  } else if (std::regex_match(buff, rexmit_pattern)) {
     return REXMIT_ORD;
   } else {
     return NO_ORD;
@@ -166,17 +168,17 @@ int cread_order(sockaddr_in& rec_addr, char* buff) {
 }
 
 void cperform_lookup_ord(struct sockaddr_in& rec_addr) {
-  char reply[BUF_SIZE + 1];
   int flags;
   ssize_t snd_len;
   socklen_t rec_addr_len;
+  std::string reply;
 
   flags = 0;
   rec_addr_len = sizeof(rec_addr);
-  sprintf(reply, "%s %d %s", MCAST_ADDR, DATA_PORT, SNAME);
+  reply = "BOREWICZ_HERE " + MCAST_ADDR + " " + std::to_string(DATA_PORT) + " " + SNAME + "\n";
 
-  snd_len = sendto(csock, reply, strlen(reply), flags, (const struct sockaddr *) &rec_addr, rec_addr_len);
-  if (snd_len < 0) {
+  snd_len = sendto(csock, reply.c_str(), reply.size(), flags, (const struct sockaddr *) &rec_addr, rec_addr_len);
+  if (snd_len != reply.size()) {
     fprintf(stderr, "sendto lookup");
   }
 }
@@ -274,7 +276,7 @@ void tinit() {
 
   multicast_addr.sin_family = AF_INET;
   multicast_addr.sin_port = htons(DATA_PORT);
-  res = inet_aton(MCAST_ADDR, &multicast_addr.sin_addr);
+  res = inet_aton(MCAST_ADDR.c_str(), &multicast_addr.sin_addr);
   if (res < 0) {
     fprintf(stderr, "inet aton");
   }

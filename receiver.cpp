@@ -139,7 +139,7 @@ void dsend_lookup() {
   char buffer[BUF_SIZE + 1];
 
   flags = 0;
-  sprintf(buffer, "%s", "LOOKUP");
+  sprintf(buffer, "%s", "ZERO_SEVEN_COME_IN\n");
   dremote_addr_len = sizeof(dremote_addr);
 
   snd_len = sendto(dsock, buffer, strlen(buffer), flags, (const struct sockaddr *) &dremote_addr,
@@ -157,9 +157,11 @@ void dmark_transmitter(char* buffer) {
   transmitter = new transmitter_t();
   delimiter = " ";
 
-  strcpy(transmitter->mcast_addr, strtok(buffer, delimiter));
+  strtok(buffer, delimiter);
+  strcpy(transmitter->mcast_addr, strtok(nullptr , delimiter));
   transmitter->data_port = atoi(strtok(nullptr, delimiter));
   strcpy(transmitter->station_name, strtok(nullptr, delimiter));
+  fprintf(stderr, "%s %d %s", transmitter->mcast_addr, transmitter->data_port, transmitter->station_name);
 
   ptr = transmitters;
   while (ptr) {
@@ -190,7 +192,6 @@ void dreceive_replies() {
 
     if (rcv_len > 0) {
       buffer[rcv_len] = NULL_TERMINATOR;
-      printf("CTRL_SOCK: %.*s from %s\n", (int) rcv_len, buffer, inet_ntoa(transmitter_addr.sin_addr));
       dmark_transmitter(buffer);
     } else if (errno == EAGAIN || errno == EWOULDBLOCK || rcv_len == 0) {
       read_replies = false;
@@ -226,7 +227,7 @@ void dsend_retransmition_requests() {
     return;
   }
 
-  request[request.size() - 1] = NULL_TERMINATOR; /* delete last coma */
+  request[request.size() - 1] = EOL; /* delete last coma */
   dremote_addr_len = sizeof(dremote_addr);
   flags = 0;
   fprintf(stderr, "%s\n", request.c_str());
