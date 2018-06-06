@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <thread>
+#include <poll.h>
 #include "helper.h"
 
 
@@ -26,8 +27,10 @@ struct transmitter_t {
   struct transmitter_t* next;
 };
 
-constexpr short MAX_NO_RESPONSE_TIME = 20;
-constexpr short DISCOVER_LOOKUP_NAP = 5;
+constexpr int MAX_NO_RESPONSE_TIME = 20;
+constexpr int DISCOVER_LOOKUP_NAP = 5;
+constexpr int RPOLL_SIZE = 2;
+constexpr int INFINITY = -1;
 
 /* receiver run parameters */
 uint16_t CTRL_PORT;
@@ -53,6 +56,7 @@ sockaddr_in dremote_addr;
 
 /* receiver */
 int rsock;
+pollfd rpoll[RPOLL_SIZE];
 uint64_t session_id;
 sockaddr_in rlocal_addr;
 
@@ -308,6 +312,11 @@ void rinit() {
   if (res < 0) {
     fprintf(stderr, "bind receiver sock");
   }
+
+  rpoll[0].fd = rsock;
+  rpoll[0].events = POLLIN;
+  rpoll[STDOUT].fd = STDOUT;
+  rpoll[STDOUT].events = POLLOUT;
 }
 
 void rset_capturing_details() {
@@ -373,7 +382,7 @@ bool rhole_in_data() {
 }
 
 void rstart_capturing() {
-  int flags;
+  int flags, ret;
   ssize_t rcv_len;
   int64_t pos;
   char message[PSIZE + AUDIO_DATA + 1];
@@ -385,42 +394,51 @@ void rstart_capturing() {
   play = false;
 
   while (true) {
-    rcv_len = recvfrom(rsock, message, PSIZE + AUDIO_DATA + 1, flags, nullptr, nullptr);
-    if (rcv_len > 0) {
-      memcpy(tmp_sid.nuint8, message, sizeof(uint64_t));
-      tmp_sid.nuint32[0] = ntohl(tmp_sid.nuint32[0]);
-      tmp_sid.nuint32[1] = ntohl(tmp_sid.nuint32[1]);
-
-      memcpy(tmp_fbyte.nuint8, &message[sizeof(uint64_t)], sizeof(uint64_t));
-      tmp_fbyte.nuint32[0] = ntohl(tmp_fbyte.nuint32[0]);
-      tmp_fbyte.nuint32[1] = ntohl(tmp_fbyte.nuint32[1]);
-
-      if (tmp_sid.nuint64 < session_id || tmp_fbyte.nuint64 < pexp_byte) {
-        continue;
-      } else if (tmp_sid.nuint64 > session_id) {
-        return;
-      }
-
-      pos = package_pos(tmp_fbyte.nuint64);
-      package_t& package = packages[pos];
-
-      package.sid = tmp_sid.nuint64;
-      package.fbyte = tmp_fbyte.nuint64;
-      memcpy(package.data, &message[AUDIO_DATA], PSIZE);
-
-      if (package.fbyte > bbyte) {
-        bbyte = package.fbyte;
-        rmove_phead();
-      }
-
-      if (!play && package.fbyte >= byte_zero + (BSIZE * 3) / 4) {
-        play = true;
-      }
-    } else if (rcv_len < 0 && !(errno == EAGAIN || errno == EWOULDBLOCK)) {
-      fprintf(stderr, "recvfrom receiver socket");
+    rpoll[0].revents = 0;
+    rpoll[STDOUT].revents = 0;
+    ret = poll(rpoll, RPOLL_SIZE, INFINITY);
+    if (ret < 0) {
+      fprintf(stderr, "receiver ret");
     }
 
-    if (play) {
+    if (rpoll[0].revents & POLLIN) {
+      rcv_len = recvfrom(rsock, message, PSIZE + AUDIO_DATA + 1, flags, nullptr, nullptr);
+      if (rcv_len > 0) {
+        memcpy(tmp_sid.nuint8, message, sizeof(uint64_t));
+        tmp_sid.nuint32[0] = ntohl(tmp_sid.nuint32[0]);
+        tmp_sid.nuint32[1] = ntohl(tmp_sid.nuint32[1]);
+
+        memcpy(tmp_fbyte.nuint8, &message[sizeof(uint64_t)], sizeof(uint64_t));
+        tmp_fbyte.nuint32[0] = ntohl(tmp_fbyte.nuint32[0]);
+        tmp_fbyte.nuint32[1] = ntohl(tmp_fbyte.nuint32[1]);
+
+        if (tmp_sid.nuint64 < session_id || tmp_fbyte.nuint64 < pexp_byte) {
+          continue;
+        } else if (tmp_sid.nuint64 > session_id) {
+          return;
+        }
+
+        pos = package_pos(tmp_fbyte.nuint64);
+        package_t &package = packages[pos];
+
+        package.sid = tmp_sid.nuint64;
+        package.fbyte = tmp_fbyte.nuint64;
+        memcpy(package.data, &message[AUDIO_DATA], PSIZE);
+
+        if (package.fbyte > bbyte) {
+          bbyte = package.fbyte;
+          rmove_phead();
+        }
+
+        if (!play && package.fbyte >= byte_zero + (BSIZE * 3) / 4) {
+          play = true;
+        }
+      } else if (rcv_len < 0 && !(errno == EAGAIN || errno == EWOULDBLOCK)) {
+        fprintf(stderr, "recvfrom receiver socket");
+      }
+    }
+
+    if ((rpoll[STDOUT].revents & POLLOUT) && play) {
       if (rhole_in_data()) {
         return;
       } else {

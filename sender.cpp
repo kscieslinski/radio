@@ -235,7 +235,7 @@ void controler() {
   while (data_left) {
     memset(buff, 0, BUF_SIZE + 1);
     order = cread_order(rec_addr, buff);
-    cperform_order(order, buff, rec_addr);
+    cperform_order(static_cast<short>(order), buff, rec_addr);
   }
 }
 
