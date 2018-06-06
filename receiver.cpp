@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <thread>
 #include <poll.h>
+#include <sys/time.h>
 #include "helper.h"
 
 
@@ -207,8 +208,8 @@ void dsend_retransmition_requests() {
   int64_t act_pos;
   uint64_t act_exp_bytes;
 
-  act_pos = package_pos(pexp_byte);
   act_exp_bytes = pexp_byte;
+  act_pos = package_pos(act_exp_bytes);
   retransmit_packages_no = 0;
   std::string request = "LOURDER_PLEASE ";
 
@@ -228,7 +229,7 @@ void dsend_retransmition_requests() {
   request[request.size() - 1] = NULL_TERMINATOR; /* delete last coma */
   dremote_addr_len = sizeof(dremote_addr);
   flags = 0;
-  //printf("%s\n", request.c_str());
+  fprintf(stderr, "%s\n", request.c_str());
   snd_len = sendto(dsock, request.c_str(), request.size(), flags, (const struct sockaddr *) &dremote_addr,
                    dremote_addr_len);
   if (snd_len != request.size()) {
@@ -316,7 +317,7 @@ void rinit() {
   rpoll[0].fd = rsock;
   rpoll[0].events = POLLIN;
   rpoll[STDOUT].fd = STDOUT;
-  rpoll[STDOUT].events = POLLOUT;
+  rpoll[STDOUT].events = 0;
 }
 
 void rset_capturing_details() {
@@ -343,7 +344,7 @@ void rset_capturing_details() {
   tmp.nuint32[1] = ntohl(tmp.nuint32[1]);
   byte_zero = tmp.nuint64;
 
-  //printf("\nSETTING: %ld\n", byte_zero);
+  fprintf(stderr, "\nSETTING: %ld\n", byte_zero);
 
   bbyte = byte_zero;
   pexp_byte = byte_zero + PSIZE;
@@ -356,16 +357,26 @@ void rmove_phead() {
   }
 }
 
-void debug_print_packages() {
-  printf("packages: ");
+void debug_print_packages(bool play) {
+  int64_t phead_pos;
+  char white_space;
+
+  phead_pos = package_pos(pexp_byte);
+  fprintf(stderr, "play=%d\n", play);
   for (int i = 0; i < MAX_PACKAGES_NO; ++i) {
-    if (packages[i].sid != session_id) {
-      printf("[ ], ");
+    if (i == phead_pos) {
+      white_space = '>';
     } else {
-      printf("[%ld], ", packages[i].fbyte);
+      white_space = ' ';
+    }
+
+    if (packages[i].sid != session_id) {
+      fprintf(stderr, "%c[ ]", white_space);
+    } else {
+      fprintf(stderr, "%c[%ld]", white_space, packages[i].fbyte);
     }
   }
-  printf("\n");
+  fprintf(stderr, "\n\n");
 }
 
 bool rhole_in_data() {
@@ -378,7 +389,6 @@ bool rhole_in_data() {
   }
 
   return packages[player_head].fbyte != pexp_byte;
-
 }
 
 void rstart_capturing() {
@@ -428,17 +438,17 @@ void rstart_capturing() {
         if (package.fbyte > bbyte) {
           bbyte = package.fbyte;
           rmove_phead();
-        }
-
-        if (!play && package.fbyte >= byte_zero + (BSIZE * 3) / 4) {
-          play = true;
+          if (!play && bbyte >= byte_zero + (BSIZE * 3) / 4) {
+            play = true;
+            rpoll[STDOUT].events = POLLOUT;
+          }
         }
       } else if (rcv_len < 0 && !(errno == EAGAIN || errno == EWOULDBLOCK)) {
         fprintf(stderr, "recvfrom receiver socket");
       }
     }
 
-    if ((rpoll[STDOUT].revents & POLLOUT) && play) {
+    if (rpoll[STDOUT].revents & POLLOUT && play) {
       if (rhole_in_data()) {
         return;
       } else {
@@ -456,6 +466,7 @@ void receiver() {
     rset_capturing_details();
     rstart_capturing();
     connected = false;
+    rpoll[STDOUT].events = 0;
   }
 }
 

@@ -22,5 +22,6 @@ constexpr int AUDIO_DATA = 16;
 
 int64_t next(int64_t count, int64_t pos, int64_t total_elements_number);
 int64_t prev(int64_t count, int64_t pos, int64_t total_elements_number);
+uint64_t get_microseconds();
 
 #endif //RADIO_HELPER_H

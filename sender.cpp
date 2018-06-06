@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <thread>
 #include <mutex>
+#include <unordered_set>
 #include "helper.h"
 
 
@@ -23,7 +24,6 @@ constexpr short TRANSMITTER_NAP = 1;
 
 struct package_t {
   uint64_t fbyte;
-  bool retransmit;
   char* data;
 };
 
@@ -44,6 +44,10 @@ nuint64_t SESSION_ID;
 std::vector<package_t> packages;
 nuint64_t read_bytes;
 bool data_left;
+
+std::unordered_set<uint64_t> rexmit_fresh;
+std::unordered_set<uint64_t> rexmit_old;
+std::mutex rexmit_mut;
 
 int tsock;
 std::mutex tsock_mut;
@@ -77,15 +81,11 @@ void send_package(package_t& package) {
   flags = 0;
   multicast_address_len = sizeof(multicast_addr);
 
-  //if (time(nullptr) % 3 == 0) return; /* simulating data lose */
-
   snd_len = sendto(tsock, package.data, PSIZE + AUDIO_DATA + 1, flags,
                    (const struct sockaddr *) &multicast_addr, multicast_address_len);
   if (snd_len != PSIZE + AUDIO_DATA + 1) {
     fprintf(stderr, "sendto multicaster");
   }
-
-  package.retransmit = false;
 }
 
 void init() {
@@ -181,16 +181,6 @@ void cperform_lookup_ord(struct sockaddr_in& rec_addr) {
   }
 }
 
-void cmark_retransmition_request(uint64_t missing_package_fbyte) {
-  int64_t missing_package_pos;
-
-  missing_package_pos = package_pos(missing_package_fbyte);
-
-  if (packages[missing_package_pos].fbyte == missing_package_fbyte) {
-    packages[missing_package_pos].retransmit = true;
-  }
-}
-
 void cperform_rexmit_ord(char* buffer) {
   uint64_t package_to_retransmit;
   const char* coma_delimiter;
@@ -204,11 +194,13 @@ void cperform_rexmit_ord(char* buffer) {
   packages_list = buf_copy + strlen("LOUDER_PLEASE") + 1;
 
   token = strtok(packages_list, coma_delimiter);
+  rexmit_mut.lock();
   while (token) {
     package_to_retransmit = (uint64_t) atoll(token);
-    cmark_retransmition_request(package_to_retransmit);
+    rexmit_fresh.insert(package_to_retransmit);
     token = strtok(nullptr, coma_delimiter);
   }
+  rexmit_mut.unlock();
 }
 
 void cperform_order(short order, char* buff, sockaddr_in& rec_addr) {
@@ -243,18 +235,20 @@ void controler() {
  *                                                  RETRANSMITTER                                                     *
  *--------------------------------------------------------------------------------------------------------------------*/
 void retransmit() {
-  int64_t ptr, head;
+  int64_t pos;
+
+  rexmit_mut.lock();
+  rexmit_old = std::move(rexmit_fresh);
+  rexmit_fresh.clear();
+  rexmit_mut.unlock();
 
   tsock_mut.lock();
 
-  head = package_pos(read_bytes.nuint64);
-  ptr = next(1, head, MAX_PACKAGES_NO);
-
-  while (ptr != head) {
-    if (packages[ptr].retransmit) {
-      send_package(packages[ptr]);
+  for (uint64_t fbyte : rexmit_old) {
+    pos = package_pos(fbyte);
+    if (fbyte == packages[pos].fbyte) {
+      send_package(packages[pos]);
     }
-    ptr = next(1, ptr, MAX_PACKAGES_NO);
   }
 
   tsock_mut.unlock();
@@ -322,7 +316,6 @@ bool tread_from_stdin() {
   send_package(package);
 
   tsock_mut.unlock();
-
   return true;
 }
 
