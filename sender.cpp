@@ -14,7 +14,9 @@
 #include <thread>
 #include <mutex>
 #include <unordered_set>
+#include "boost/program_options.hpp"
 #include <regex>
+#include <iostream>
 
 #include "helper.h"
 
@@ -92,15 +94,41 @@ void send_package(package_t& package) {
   }
 }
 
-void init() {
+void init(int argc, char** argv) {
+  namespace po = boost::program_options;
+
+  try {
+    po::options_description desc("Allowed options");
+    desc.add_options()
+      ("help", "produce help message")
+      (",a", po::value<std::string>(&MCAST_ADDR)->required()->default_value("239.10.11.12"), "set MCAST_ADDR")
+      (",P", po::value<uint16_t>(&DATA_PORT)->default_value(27075), "set DATA_PORT")
+      (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(37075), "set CTRL_PORT")
+      (",p", po::value<uint64_t>(&PSIZE)->default_value(512), "set PSIZE")
+      (",f", po::value<uint64_t>(&FSIZE)->default_value(128000), "set FSIZE")
+      (",R", po::value<uint64_t>(&RTIME)->default_value(250), "set RTIME")
+      (",n", po::value<std::string>(&SNAME)->default_value("Nienazwany Nadajnik"));
+
+    po::variables_map vm;
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+
+    if (vm.count("help")) {
+      std::cout << "Sender" << std::endl << desc << std::endl;
+      exit(0);
+    }
+
+    po::notify(vm);
+    if (PSIZE == 0 || !inet_aton(MCAST_ADDR.c_str(), &multicast_addr.sin_addr)) {
+      std::cerr << "Invalid program options" << std::endl;
+      exit(1);
+    }
+  } catch (std::exception& e) {
+    fprintf(stderr, "Invalid program options\n");
+    exit(1);
+  }
+
   data_left = true;
-  SNAME = const_cast<char *>("Radio Pruszkow");
-  MCAST_ADDR = const_cast<char *>("239.10.11.12");
-  DATA_PORT = 27075;
-  CTRL_PORT = 37075;
-  RTIME = 250;
-  FSIZE = 131072; //50;
-  PSIZE = 512;
+
   MAX_PACKAGES_NO = FSIZE / PSIZE;
   SESSION_ID.nuint64 = static_cast<uint64_t>(time(nullptr));
   read_bytes.nuint64 = 0;
@@ -198,7 +226,7 @@ void cperform_rexmit_ord(char* buffer) {
   token = strtok(packages_list, coma_delimiter);
   rexmit_mut.lock();
   while (token) {
-    package_to_retransmit = (uint64_t) atoll(token);
+    package_to_retransmit = (uint64_t) std::stoull(token);
     rexmit_fresh.insert(package_to_retransmit);
     token = strtok(nullptr, coma_delimiter);
   }
@@ -336,8 +364,8 @@ void transmitter() {
 /* -------------------------------------------------------------------------------------------------------------------*
  *                                                  MAIN                                                              *
  *--------------------------------------------------------------------------------------------------------------------*/
-int main() {
-  init();
+int main(int argc, char** argv) {
+  init(argc, argv);
 
   std::thread tthread{transmitter};
   controler();

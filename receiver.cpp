@@ -11,6 +11,7 @@
 #include <thread>
 #include <poll.h>
 #include <sys/time.h>
+#include <boost/program_options.hpp>
 #include "helper.h"
 
 
@@ -31,7 +32,7 @@ struct transmitter_t {
 constexpr int MAX_NO_RESPONSE_TIME = 20;
 constexpr int DISCOVER_LOOKUP_NAP = 5;
 constexpr int RPOLL_SIZE = 2;
-constexpr int INFINITY = -1;
+constexpr int NO_LIMIT = -1;
 
 /* receiver run parameters */
 uint16_t CTRL_PORT;
@@ -70,14 +71,27 @@ int64_t package_pos(uint64_t fbyte) {
   return pos;
 }
 
-void init() {
+void init(int argc, char** argv) {
+  namespace po = boost::program_options;
+  try {
+    po::options_description desc("Allowed options");
+    desc.add_options()
+      ("help", "produce help message")
+      (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(37075), "set CTRL_PORT")
+      (",b", po::value<uint64_t>(&BSIZE)->default_value(500000), "set BSIZE")
+      (",R", po::value<uint64_t>(&RTIME)->default_value(250), "set RTIME");
+
+    po::variables_map vm;
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+  } catch (std::exception& e) {
+    fprintf(stderr, "Invalid program options");
+  }
+
   MCAST_ADDR = const_cast<char *>("239.10.11.12");
   dADDR = const_cast<char *>("255.255.255.255");
-  RTIME = 250;
-  CTRL_PORT = 37075;
   DATA_PORT = 27075;
   PSIZE = 512;// 10;
-  BSIZE = 65536; //80;
   MAX_PACKAGES_NO = BSIZE / PSIZE;
   connected = false;
   transmitters = nullptr;
@@ -407,7 +421,7 @@ void rstart_capturing() {
   while (true) {
     rpoll[0].revents = 0;
     rpoll[STDOUT].revents = 0;
-    ret = poll(rpoll, RPOLL_SIZE, INFINITY);
+    ret = poll(rpoll, RPOLL_SIZE, NO_LIMIT);
     if (ret < 0) {
       fprintf(stderr, "receiver ret");
     }
@@ -474,8 +488,8 @@ void receiver() {
 /* -------------------------------------------------------------------------------------------------------------------*
  *                                                  MAIN                                                              *
  *--------------------------------------------------------------------------------------------------------------------*/
-int main() {
-  init();
+int main(int argc, char** argv) {
+  init(argc, argv);
 
   std::thread dthread{discover};
   receiver();
