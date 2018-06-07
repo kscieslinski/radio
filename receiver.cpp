@@ -66,7 +66,7 @@ sockaddr_in rlocal_addr;
 int64_t package_pos(uint64_t fbyte) {
   int64_t pos;
 
-  pos = ((fbyte - byte_zero) / PSIZE - 1) % MAX_PACKAGES_NO;
+  pos = ((fbyte - byte_zero) / PSIZE) % MAX_PACKAGES_NO;
   assert(pos >= 0 && pos < MAX_PACKAGES_NO);
   return pos;
 }
@@ -78,7 +78,7 @@ void init(int argc, char** argv) {
     desc.add_options()
       ("help", "produce help message")
       (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(37075), "set CTRL_PORT")
-      (",b", po::value<uint64_t>(&BSIZE)->default_value(500000), "set BSIZE")
+      (",b", po::value<uint64_t>(&BSIZE)->default_value(80), "set BSIZE")
       (",R", po::value<uint64_t>(&RTIME)->default_value(250), "set RTIME");
 
     po::variables_map vm;
@@ -91,7 +91,7 @@ void init(int argc, char** argv) {
   MCAST_ADDR = const_cast<char *>("239.10.11.12");
   dADDR = const_cast<char *>("255.255.255.255");
   DATA_PORT = 27075;
-  PSIZE = 512;// 10;
+  PSIZE = 10;//512;// 10;
   MAX_PACKAGES_NO = BSIZE / PSIZE;
   connected = false;
   transmitters = nullptr;
@@ -201,7 +201,7 @@ void dreceive_replies() {
 
   read_replies = true;
   do {
-    rcv_len = recvfrom(dsock, buffer, BUF_SIZE, flags, (sockaddr *) &transmitter_addr,
+    rcv_len = recvfrom(dsock, buffer, BUF_SIZE, flags, (struct sockaddr *) &transmitter_addr,
                        &transmitter_addr_len);
 
     if (rcv_len > 0) {
@@ -304,6 +304,7 @@ void rinit() {
 
   session_id = 0;
   byte_zero = 0;
+  pexp_byte = 0;
 
   rlocal_addr.sin_family = AF_INET;
   rlocal_addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -333,37 +334,6 @@ void rinit() {
   rpoll[0].events = POLLIN;
   rpoll[STDOUT].fd = STDOUT;
   rpoll[STDOUT].events = 0;
-}
-
-void rset_capturing_details() {
-  int flags;
-  ssize_t rcv_len;
-  char buffer[PSIZE + AUDIO_DATA + 1];
-  nuint64_t tmp{};
-
-  flags = 0;
-  memset(buffer, 0, PSIZE + AUDIO_DATA + 1);
-
-  rcv_len = recvfrom(rsock, buffer, PSIZE + AUDIO_DATA + 1, flags, nullptr, nullptr);
-  if (rcv_len < 0) {
-    fprintf(stderr, "recvfrom receiver socket");
-  }
-
-  memcpy(tmp.nuint8, buffer, sizeof(tmp));
-  tmp.nuint32[0] = ntohl(tmp.nuint32[0]);
-  tmp.nuint32[1] = ntohl(tmp.nuint32[1]);
-  session_id = tmp.nuint64;
-
-  memcpy(tmp.nuint8, &buffer[sizeof(uint64_t)], sizeof(tmp));
-  tmp.nuint32[0] = ntohl(tmp.nuint32[0]);
-  tmp.nuint32[1] = ntohl(tmp.nuint32[1]);
-  byte_zero = tmp.nuint64;
-
-  fprintf(stderr, "\nSETTING: %ld\n", byte_zero);
-
-  bbyte = byte_zero;
-  pexp_byte = byte_zero + PSIZE;
-  connected = true;
 }
 
 void rmove_phead() {
@@ -407,6 +377,10 @@ bool rhole_in_data() {
 }
 
 void rstart_capturing() {
+
+}
+
+void receiver() {
   int flags, ret;
   ssize_t rcv_len;
   int64_t pos;
@@ -415,10 +389,13 @@ void rstart_capturing() {
   nuint64_t tmp_sid{};
   nuint64_t tmp_fbyte{};
 
+  rinit();
+
   flags = 0;
   play = false;
 
   while (true) {
+    debug_print_packages(play);
     rpoll[0].revents = 0;
     rpoll[STDOUT].revents = 0;
     ret = poll(rpoll, RPOLL_SIZE, NO_LIMIT);
@@ -440,7 +417,11 @@ void rstart_capturing() {
         if (tmp_sid.nuint64 < session_id || tmp_fbyte.nuint64 < pexp_byte) {
           continue;
         } else if (tmp_sid.nuint64 > session_id) {
-          return;
+          session_id = tmp_sid.nuint64;
+          pexp_byte = bbyte = byte_zero = tmp_fbyte.nuint64;
+          play = false;
+          rpoll[STDOUT].events = 0;
+          fprintf(stderr, "\nSETTING: %ld\n", byte_zero);
         }
 
         pos = package_pos(tmp_fbyte.nuint64);
@@ -465,23 +446,14 @@ void rstart_capturing() {
 
     if (rpoll[STDOUT].revents & POLLOUT && play) {
       if (rhole_in_data()) {
-        return;
+        session_id = 0;
+        play = false;
+        rpoll[STDOUT].events = 0;
       } else {
         write(STDOUT, packages[package_pos(pexp_byte)].data, PSIZE);
         pexp_byte += PSIZE;
       }
     }
-  }
-}
-
-void receiver() {
-  rinit();
-
-  while (true) {
-    rset_capturing_details();
-    rstart_capturing();
-    connected = false;
-    rpoll[STDOUT].events = 0;
   }
 }
 

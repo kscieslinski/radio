@@ -104,8 +104,8 @@ void init(int argc, char** argv) {
       (",a", po::value<std::string>(&MCAST_ADDR)->required()->default_value("239.10.11.12"), "set MCAST_ADDR")
       (",P", po::value<uint16_t>(&DATA_PORT)->default_value(27075), "set DATA_PORT")
       (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(37075), "set CTRL_PORT")
-      (",p", po::value<uint64_t>(&PSIZE)->default_value(512), "set PSIZE")
-      (",f", po::value<uint64_t>(&FSIZE)->default_value(128000), "set FSIZE")
+      (",p", po::value<uint64_t>(&PSIZE)->default_value(10), "set PSIZE")
+      (",f", po::value<uint64_t>(&FSIZE)->default_value(50), "set FSIZE")
       (",R", po::value<uint64_t>(&RTIME)->default_value(250), "set RTIME")
       (",n", po::value<std::string>(&SNAME)->default_value("Nienazwany Nadajnik"));
 
