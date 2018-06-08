@@ -12,6 +12,8 @@
 #include <poll.h>
 #include <sys/time.h>
 #include <boost/program_options.hpp>
+#include <atomic>
+#include <mutex>
 #include "helper.h"
 
 
@@ -23,8 +25,8 @@ struct package_t {
 
 struct transmitter_t {
   std::string station_name;
-  char mcast_addr[DOTTED_ADDR_SIZE + 1];
-  int data_port;
+  std::string mcast_addr;
+  uint16_t data_port;
   int last_heard; /* in seconds */
   struct transmitter_t* next;
 };
@@ -51,17 +53,20 @@ uint64_t MAX_PACKAGES_NO;
 char* MCAST_ADDR;
 char* dADDR;
 
-/* shared */
-transmitter_t* transmitters;
+
+/* shared (receiver && discover) */
 std::vector<package_t> packages;
-
-bool connected;
-int picked;
-uint64_t transmitters_no;
-
 uint64_t byte_zero;
 uint64_t pexp_byte; /* determinates player head position */
 uint64_t bbyte;
+
+/* shared (interface && discover) */
+transmitter_t* transmitters;
+std::atomic<int> picked;
+std::atomic<int> transmitters_no;
+std::atomic<bool> refresh;
+std::mutex trans_mut;
+
 
 /* discover */
 int dsock;
@@ -78,6 +83,17 @@ int isock;
 pollfd ipoll[_POSIX_OPEN_MAX];
 sockaddr_in ilocal_addr;
 
+void debug_print_transmitters() {
+  transmitter_t *ptr;
+
+  printf("\nTransmitters:\n"); fflush(stdout);
+  ptr = transmitters;
+  while (ptr) {
+    printf("%s", ptr->station_name.c_str());
+    ptr = ptr->next;
+  }
+
+}
 
 void cwrite(int sock, const char* msg, size_t msg_size) {
   ssize_t len;
@@ -119,8 +135,8 @@ void init(int argc, char** argv) {
   DATA_PORT = 27075;
   PSIZE = 10;//512;// 10;
   MAX_PACKAGES_NO = BSIZE / PSIZE;
-  connected = false;
   transmitters = nullptr;
+  picked = -1;
 
   packages.resize(MAX_PACKAGES_NO);
   for (int i = 0; i < MAX_PACKAGES_NO; ++i) {
@@ -176,42 +192,72 @@ void dsend_lookup() {
   socklen_t dremote_addr_len;
   int flags;
   ssize_t snd_len;
-  char buffer[BUF_SIZE + 1];
+  std::string request;
+
+  request = "ZERO_SEVEN_COME_IN\n";
 
   flags = 0;
-  sprintf(buffer, "%s", "ZERO_SEVEN_COME_IN\n");
   dremote_addr_len = sizeof(dremote_addr);
 
-  snd_len = sendto(dsock, buffer, strlen(buffer), flags, (const struct sockaddr *) &dremote_addr,
+  snd_len = sendto(dsock, request.c_str(), request.size(), flags, (const struct sockaddr *) &dremote_addr,
                    dremote_addr_len);
-  if (snd_len != strlen(buffer)) {
+  if (snd_len != request.size()) {
     fprintf(stderr, "partial/failed write");
   }
 }
 
 void dmark_transmitter(char* buffer) {
-  transmitter_t *ptr;
+  transmitter_t *fptr;
+  transmitter_t *bptr;
   transmitter_t *transmitter;
+  int pos;
   const char* delimiter;
 
   transmitter = new transmitter_t();
+  transmitter->next = nullptr;
   delimiter = " ";
 
   strtok(buffer, delimiter);
-  strcpy(transmitter->mcast_addr, strtok(nullptr , delimiter));
-  transmitter->data_port = atoi(strtok(nullptr, delimiter));
+  transmitter->mcast_addr = std::string(strtok(nullptr, delimiter));
+  transmitter->data_port = static_cast<uint16_t>(std::stoi(strtok(nullptr, delimiter)));
   transmitter->station_name = std::string(strtok(nullptr, delimiter));
-  fprintf(stderr, "%s %d %s", transmitter->mcast_addr, transmitter->data_port, transmitter->station_name.c_str());
 
-  ptr = transmitters;
-  while (ptr) {
-    if ((ptr->station_name).compare(transmitter->station_name) == 0) {
-      transmitter->last_heard = 0;
-      free(transmitter);
-      return;
-    }
-    ptr = ptr->next;
+  if (!transmitters) {
+    transmitters = transmitter;
+    transmitters_no++;
+    picked++;
+    refresh = true;
+    return;
   }
+
+  bptr = nullptr;
+  fptr = transmitters;
+  pos = 0;
+  while (fptr && fptr->station_name.compare(transmitter->station_name) < 0) {
+    bptr = fptr;
+    fptr = fptr->next;
+    pos++;
+  }
+
+  if (fptr && fptr->station_name.compare(transmitter->station_name) == 0) {
+    transmitter->last_heard = 0;
+    delete(transmitter);
+    return;
+  }
+
+  if (!bptr) {
+    transmitters = transmitter;
+    transmitter->next = fptr;
+  } else {
+    bptr->next = transmitter;
+    transmitter->next = fptr;
+  }
+
+  if (pos < picked || picked == -1) {
+    picked++;
+  }
+  transmitters_no++;
+  refresh = true;
 }
 
 void dreceive_replies() {
@@ -219,26 +265,31 @@ void dreceive_replies() {
   socklen_t transmitter_addr_len;
   sockaddr_in transmitter_addr{};
   ssize_t rcv_len;
-  char buffer[BUF_SIZE + 1];
+  char buffer[BUF_SMALL_SIZE + 1];
   int flags;
 
+  trans_mut.lock();
   flags = 0;
   transmitter_addr_len = sizeof(transmitter_addr);
 
+
   read_replies = true;
   do {
-    rcv_len = recvfrom(dsock, buffer, BUF_SIZE, flags, (struct sockaddr *) &transmitter_addr,
+    rcv_len = recvfrom(dsock, buffer, BUF_SMALL_SIZE, flags, (struct sockaddr *) &transmitter_addr,
                        &transmitter_addr_len);
 
     if (rcv_len > 0) {
       buffer[rcv_len] = NULL_TERMINATOR;
       dmark_transmitter(buffer);
+      debug_print_transmitters();
     } else if (errno == EAGAIN || errno == EWOULDBLOCK || rcv_len == 0) {
       read_replies = false;
     }  else {
       fprintf(stderr, "recvfrom discover socket");
     }
   } while (read_replies);
+
+  trans_mut.unlock();
 }
 
 void dsend_retransmition_requests() {
@@ -270,7 +321,6 @@ void dsend_retransmition_requests() {
   request[request.size() - 1] = EOL; /* delete last coma */
   dremote_addr_len = sizeof(dremote_addr);
   flags = 0;
-  fprintf(stderr, "%s\n", request.c_str());
   snd_len = sendto(dsock, request.c_str(), request.size(), flags, (const struct sockaddr *) &dremote_addr,
                    dremote_addr_len);
   if (snd_len != request.size()) {
@@ -281,22 +331,31 @@ void dsend_retransmition_requests() {
 void dremove_unused_transmitters() {
   struct transmitter_t* front;
   struct transmitter_t* back;
+  int pos;
 
   if (!transmitters) {
+    trans_mut.unlock();
     return;
   }
 
+  pos = 0;
   back = transmitters;
   front = transmitters->next;
   while (front) {
     front->last_heard += DISCOVER_LOOKUP_NAP;
     if (front->last_heard > MAX_NO_RESPONSE_TIME) {
       back->next = front->next;
-      free(front);
+      if (pos <= picked) {
+        picked--;
+      }
+      transmitters_no--;
+      refresh = true;
+      delete(front);
       front = back->next;
     } else {
       back = front;
       front = front->next;
+      pos++;
     }
   }
 
@@ -304,7 +363,10 @@ void dremove_unused_transmitters() {
   if (transmitters->last_heard > MAX_NO_RESPONSE_TIME) {
     front = transmitters;
     transmitters = transmitters->next;
-    free(front);
+    picked--;
+    transmitters_no--;
+    refresh = true;
+    delete(front);
   }
 }
 
@@ -312,13 +374,14 @@ void discover() {
   dinit();
 
   while (true) {
-    //dsend_lookup();
-    //dreceive_replies();
-    if (connected) {
-      dsend_retransmition_requests();
-    }
-    usleep(static_cast<__useconds_t>(RTIME));
-    //dremove_unused_transmitters();
+    dsend_lookup();
+    dreceive_replies();
+    sleep(DISCOVER_LOOKUP_NAP);
+    //if (connected) {
+    //  dsend_retransmition_requests();
+    //}
+    //usleep(static_cast<__useconds_t>(RTIME));
+    dremove_unused_transmitters();
   }
 }
 /* -------------------------------------------------------------------------------------------------------------------*
@@ -485,6 +548,8 @@ void receiver() {
 void iinit() {
   int res, i;
 
+  refresh = false;
+
   isock = socket(PF_INET, SOCK_STREAM, 0);
   if (isock < 0) {
     fprintf(stderr, "sock interface");
@@ -523,8 +588,11 @@ void iconfigure_telnet(int sock) {
 std::string iget_menu() {
   uint64_t act_pos;
   transmitter_t* ptr;
-  std::string res, header, footer;
+  std::string res, header, footer, info;
 
+  trans_mut.lock();
+  info = "picked=" + std::to_string(picked) + " transmitters_no=" + std::to_string(transmitters_no) + "\n\r";
+  res.append(info);
   header = "------------------------------------------------------------------------\n\r"
            "  SIK Radio\n\r"
            "------------------------------------------------------------------------\n\r";
@@ -534,15 +602,33 @@ std::string iget_menu() {
   res.append(header);
   act_pos = 0;
   ptr = transmitters;
+
   while (ptr) {
     if (act_pos == picked) {
-      res.append("   >" + ptr->station_name + "\n");
+      res.append("   >" + ptr->station_name + "\r");
     } else {
-      res.append("    " + ptr->station_name + "\n");
+      res.append("    " + ptr->station_name + "\r");
     }
+    ptr = ptr->next;
+    act_pos++;
   }
   res.append(footer);
+
+  trans_mut.unlock();
   return res;
+}
+
+void irefresh() {
+  std::string act_menu;
+
+  act_menu = iget_menu();
+  for (int i = 1; i < _POSIX_OPEN_MAX; ++i) {
+    if (ipoll[i].fd != NOT_USED) {
+      cwrite(ipoll[i].fd, act_menu.c_str(), act_menu.size());
+    }
+  }
+
+  refresh = false;
 }
 
 void iadd_client() {
@@ -601,10 +687,6 @@ int iread_order(int sock) {
 }
 
 int iproc_order(int order, int pos) {
-  bool refresh;
-  std::string act_menu;
-
-  refresh = false;
   switch (order) {
     case CLOSE_CON_ORDER:
       ipoll[pos].fd = NOT_USED;
@@ -612,16 +694,16 @@ int iproc_order(int order, int pos) {
       break;
 
     case UP_ORD:
-      if (picked < transmitters_no) {
-        picked++;
-        refresh = true;
+      if (picked > 0) {
+        picked--;
+        irefresh();
       }
       break;
 
     case DOWN_ORD:
-      if (picked > 0) {
-        picked--;
-        refresh = true;
+      if (picked < transmitters_no - 1) {
+        picked++;
+        irefresh();
       }
       break;
 
@@ -629,19 +711,11 @@ int iproc_order(int order, int pos) {
       fprintf(stderr, "order interface");
       break;
   }
-
-  if (refresh) {
-    act_menu = iget_menu();
-    for (int i = 1; i < _POSIX_OPEN_MAX; ++i) {
-      if (ipoll[i].fd != NOT_USED) {
-        cwrite(ipoll[i].fd, act_menu.c_str(), act_menu.size());
-      }
-    }
-  }
 }
 
 void interface() {
   int ret, i, order;
+  std::string menu;
 
   iinit();
 
@@ -649,7 +723,12 @@ void interface() {
     for (i = 0; i < _POSIX_OPEN_MAX; ++i) {
       ipoll[i].revents = 0;
     }
-    ret = poll(ipoll, _POSIX_OPEN_MAX, NO_LIMIT);
+
+    if (refresh) {
+      irefresh();
+    }
+
+    ret = poll(ipoll, _POSIX_OPEN_MAX, 300);
     if (ret < 0) {
       fprintf(stderr, "poll interface");
     }
@@ -676,7 +755,7 @@ int main(int argc, char** argv) {
 
   std::thread ithread{interface};
   std::thread dthread{discover};
-  receiver();
+  //receiver();
 
   ithread.join();
   dthread.join();

@@ -146,7 +146,7 @@ void init(int argc, char** argv) {
  *                                                  CONTROLER                                                         *
  *--------------------------------------------------------------------------------------------------------------------*/
 void cinit() {
-  int broadcast_val, res;
+  int val, res;
   sockaddr_in self_address{};
 
   self_address.sin_family = AF_INET;
@@ -158,8 +158,12 @@ void cinit() {
     fprintf(stderr, "ctrl_sock");
   }
 
-  broadcast_val = 1;
-  res = setsockopt(csock, SOL_SOCKET, SO_BROADCAST, &broadcast_val, sizeof(broadcast_val));
+  val = 1;
+  if (setsockopt(csock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
+    fprintf(stderr, "reusing csock");
+  }
+
+  res = setsockopt(csock, SOL_SOCKET, SO_BROADCAST, &val, sizeof(val));
   if (res < 0) {
     fprintf(stderr, "setsockopt SO_BROADCAST");
   }
@@ -185,7 +189,7 @@ int cread_order(sockaddr_in& rec_addr, char* buff) {
   }
 
   buff[rec_bytes] = NULL_TERMINATOR;
-
+  fprintf(stderr, "CTRL: %s", buff);
   if (std::regex_match(buff, lookup_pattern)) {
     return LOOKUP_ORD;
   } else if (std::regex_match(buff, rexmit_pattern)) {
@@ -254,7 +258,7 @@ void controler() {
   char buff[BUF_SIZE + 1];
   cinit();
 
-  while (data_left) {
+  while (true)/*(data_left)*/ {
     memset(buff, 0, BUF_SIZE + 1);
     order = cread_order(rec_addr, buff);
     cperform_order(static_cast<short>(order), buff, rec_addr);
@@ -367,9 +371,9 @@ void transmitter() {
 int main(int argc, char** argv) {
   init(argc, argv);
 
-  std::thread tthread{transmitter};
+  //std::thread tthread{transmitter};
   controler();
 
-  tthread.join();
+  //tthread.join();
   return 0;
 }
