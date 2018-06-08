@@ -22,9 +22,9 @@ struct package_t {
 };
 
 struct transmitter_t {
+  std::string station_name;
   char mcast_addr[DOTTED_ADDR_SIZE + 1];
   int data_port;
-  char station_name[STATION_MAX_NAME_SIZE + 1];
   int last_heard; /* in seconds */
   struct transmitter_t* next;
 };
@@ -33,10 +33,17 @@ constexpr int MAX_NO_RESPONSE_TIME = 20;
 constexpr int DISCOVER_LOOKUP_NAP = 5;
 constexpr int RPOLL_SIZE = 2;
 constexpr int NO_LIMIT = -1;
+constexpr int QUEUE_LNG = 5;
+constexpr int CENTRAL = 0;
+constexpr int CLOSE_CON_ORDER = 1;
+constexpr int UP_ORD = 2;
+constexpr int DOWN_ORD = 3;
+
 
 /* receiver run parameters */
 uint16_t CTRL_PORT;
 uint16_t DATA_PORT;
+uint16_t UI_PORT;
 uint64_t PSIZE;
 uint64_t BSIZE;
 uint64_t RTIME;
@@ -47,7 +54,11 @@ char* dADDR;
 /* shared */
 transmitter_t* transmitters;
 std::vector<package_t> packages;
+
 bool connected;
+int picked;
+uint64_t transmitters_no;
+
 uint64_t byte_zero;
 uint64_t pexp_byte; /* determinates player head position */
 uint64_t bbyte;
@@ -62,6 +73,20 @@ pollfd rpoll[RPOLL_SIZE];
 uint64_t session_id;
 sockaddr_in rlocal_addr;
 
+/* interface */
+int isock;
+pollfd ipoll[_POSIX_OPEN_MAX];
+sockaddr_in ilocal_addr;
+
+
+void cwrite(int sock, const char* msg, size_t msg_size) {
+  ssize_t len;
+
+  len = write(sock, msg, msg_size);
+  if (len != msg_size) {
+    fprintf(stderr, "writing to socket interface\n");
+  }
+}
 
 int64_t package_pos(uint64_t fbyte) {
   int64_t pos;
@@ -79,7 +104,8 @@ void init(int argc, char** argv) {
       ("help", "produce help message")
       (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(37075), "set CTRL_PORT")
       (",b", po::value<uint64_t>(&BSIZE)->default_value(80), "set BSIZE")
-      (",R", po::value<uint64_t>(&RTIME)->default_value(250), "set RTIME");
+      (",R", po::value<uint64_t>(&RTIME)->default_value(250), "set RTIME")
+      (",U", po::value<uint16_t>(&UI_PORT)->default_value(17075), "set UI_PORT");
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -174,12 +200,12 @@ void dmark_transmitter(char* buffer) {
   strtok(buffer, delimiter);
   strcpy(transmitter->mcast_addr, strtok(nullptr , delimiter));
   transmitter->data_port = atoi(strtok(nullptr, delimiter));
-  strcpy(transmitter->station_name, strtok(nullptr, delimiter));
-  fprintf(stderr, "%s %d %s", transmitter->mcast_addr, transmitter->data_port, transmitter->station_name);
+  transmitter->station_name = std::string(strtok(nullptr, delimiter));
+  fprintf(stderr, "%s %d %s", transmitter->mcast_addr, transmitter->data_port, transmitter->station_name.c_str());
 
   ptr = transmitters;
   while (ptr) {
-    if (strcmp(ptr->station_name, transmitter->station_name) == 0) {
+    if ((ptr->station_name).compare(transmitter->station_name) == 0) {
       transmitter->last_heard = 0;
       free(transmitter);
       return;
@@ -291,7 +317,7 @@ void discover() {
     if (connected) {
       dsend_retransmition_requests();
     }
-    usleep(RTIME);
+    usleep(static_cast<__useconds_t>(RTIME));
     //dremove_unused_transmitters();
   }
 }
@@ -376,10 +402,6 @@ bool rhole_in_data() {
   return packages[player_head].fbyte != pexp_byte;
 }
 
-void rstart_capturing() {
-
-}
-
 void receiver() {
   int flags, ret;
   ssize_t rcv_len;
@@ -458,14 +480,205 @@ void receiver() {
 }
 
 /* -------------------------------------------------------------------------------------------------------------------*
+ *                                                  INTERFACE                                                         *
+ *--------------------------------------------------------------------------------------------------------------------*/
+void iinit() {
+  int res, i;
+
+  isock = socket(PF_INET, SOCK_STREAM, 0);
+  if (isock < 0) {
+    fprintf(stderr, "sock interface");
+  }
+
+  ilocal_addr.sin_family = AF_INET;
+  ilocal_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  ilocal_addr.sin_port = htons(UI_PORT);
+
+  res = bind(isock, reinterpret_cast<const sockaddr *>(&ilocal_addr), sizeof ilocal_addr);
+  if (res < 0) {
+    fprintf(stderr, "bind interface");
+  }
+
+  res = listen(isock, QUEUE_LNG);
+  if (res == -1) {
+    fprintf(stderr, "listen interface");
+  }
+
+  for (i = 0; i < _POSIX_OPEN_MAX; ++i) {
+    ipoll[i].fd = -1;
+    ipoll[i].events = POLLIN;
+    ipoll[i].revents = 0;
+  }
+  ipoll[CENTRAL].fd = isock;
+}
+
+void iconfigure_telnet(int sock) {
+  std::string IAC_WILL_ECHO_SGA = "\377\373\001\377\373\003";
+  std::string HIDE_CURSOR = "\e[?25l\n\r";
+
+  cwrite(sock, IAC_WILL_ECHO_SGA.c_str(), IAC_WILL_ECHO_SGA.size());
+  cwrite(sock, HIDE_CURSOR.c_str(), HIDE_CURSOR.size());
+}
+
+std::string iget_menu() {
+  uint64_t act_pos;
+  transmitter_t* ptr;
+  std::string res, header, footer;
+
+  header = "------------------------------------------------------------------------\n\r"
+           "  SIK Radio\n\r"
+           "------------------------------------------------------------------------\n\r";
+
+  footer = "------------------------------------------------------------------------\n\r";
+
+  res.append(header);
+  act_pos = 0;
+  ptr = transmitters;
+  while (ptr) {
+    if (act_pos == picked) {
+      res.append("   >" + ptr->station_name + "\n");
+    } else {
+      res.append("    " + ptr->station_name + "\n");
+    }
+  }
+  res.append(footer);
+  return res;
+}
+
+void iadd_client() {
+  std::string menu;
+
+  int client_sock, i, res;
+
+  client_sock = accept(isock, 0, 0);
+  if (client_sock < 0) {
+    fprintf(stderr, "accept interface");
+  }
+
+  for (i = 1; i < _POSIX_OPEN_MAX; ++i) {
+    if (ipoll[i].fd == NOT_USED) {
+      ipoll[i].fd = client_sock;
+      iconfigure_telnet(client_sock);
+      menu = iget_menu();
+      cwrite(ipoll[i].fd, menu.c_str(), menu.size());
+      return;
+    }
+  }
+
+  fprintf(stderr, "to many clients interface");
+  res = close(client_sock);
+  if (res < 0) {
+    fprintf(stderr, "close interface");
+  }
+}
+
+int iread_order(int sock) {
+  ssize_t rcv_bytes;
+  char c;
+  int step;
+
+  step = 0;
+
+  while (true) {
+    rcv_bytes = read(sock, &c, 1);
+    if (rcv_bytes < 0) {
+      fprintf(stderr, "read order interface");
+    }
+    if (rcv_bytes == 0) {
+      return CLOSE_CON_ORDER;
+    }
+
+    if ((step == 0 && c == ESC) || (step == 1 && c == '[')) {
+      step++;
+    } else if (step == 2 && c == 'A') {
+      return UP_ORD;
+    } else if (step == 2 && c == 'B') {
+      return DOWN_ORD;
+    } else {
+      step = 0;
+    }
+  }
+}
+
+int iproc_order(int order, int pos) {
+  bool refresh;
+  std::string act_menu;
+
+  refresh = false;
+  switch (order) {
+    case CLOSE_CON_ORDER:
+      ipoll[pos].fd = NOT_USED;
+      ipoll[pos].revents = 0;
+      break;
+
+    case UP_ORD:
+      if (picked < transmitters_no) {
+        picked++;
+        refresh = true;
+      }
+      break;
+
+    case DOWN_ORD:
+      if (picked > 0) {
+        picked--;
+        refresh = true;
+      }
+      break;
+
+    default:
+      fprintf(stderr, "order interface");
+      break;
+  }
+
+  if (refresh) {
+    act_menu = iget_menu();
+    for (int i = 1; i < _POSIX_OPEN_MAX; ++i) {
+      if (ipoll[i].fd != NOT_USED) {
+        cwrite(ipoll[i].fd, act_menu.c_str(), act_menu.size());
+      }
+    }
+  }
+}
+
+void interface() {
+  int ret, i, order;
+
+  iinit();
+
+  while(true) {
+    for (i = 0; i < _POSIX_OPEN_MAX; ++i) {
+      ipoll[i].revents = 0;
+    }
+    ret = poll(ipoll, _POSIX_OPEN_MAX, NO_LIMIT);
+    if (ret < 0) {
+      fprintf(stderr, "poll interface");
+    }
+
+    if (ipoll[CENTRAL].revents & POLLIN) {
+      iadd_client();
+    }
+
+    for (i = 1; i < _POSIX_OPEN_MAX; ++i) {
+      if (ipoll[i].revents & POLLIN) {
+        order = iread_order(ipoll[i].fd);
+        iproc_order(order, i);
+      }
+    }
+  }
+}
+
+
+/* -------------------------------------------------------------------------------------------------------------------*
  *                                                  MAIN                                                              *
  *--------------------------------------------------------------------------------------------------------------------*/
 int main(int argc, char** argv) {
   init(argc, argv);
 
+  std::thread ithread{interface};
   std::thread dthread{discover};
   receiver();
 
+  ithread.join();
   dthread.join();
   return 0;
 }
