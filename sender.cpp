@@ -104,10 +104,10 @@ void init(int argc, char** argv) {
       (",a", po::value<std::string>(&MCAST_ADDR)->required()->default_value("239.10.11.12"), "set MCAST_ADDR")
       (",P", po::value<uint16_t>(&DATA_PORT)->default_value(27075), "set DATA_PORT")
       (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(37075), "set CTRL_PORT")
-      (",p", po::value<uint64_t>(&PSIZE)->default_value(10), "set PSIZE")
-      (",f", po::value<uint64_t>(&FSIZE)->default_value(50), "set FSIZE")
+      (",p", po::value<uint64_t>(&PSIZE)->default_value(512), "set PSIZE")
+      (",f", po::value<uint64_t>(&FSIZE)->default_value(128000), "set FSIZE")
       (",R", po::value<uint64_t>(&RTIME)->default_value(250), "set RTIME")
-      (",n", po::value<std::string>(&SNAME)->default_value("Nienazwany Nadajnik"));
+      (",n", po::value<std::string>(&SNAME)->default_value("Nienazwany"));
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -331,7 +331,7 @@ bool tread_from_stdin() {
   for (int i = 0; i < PSIZE; ++i) {
     c = getchar();
     if (c == EOF) {
-      printf("End of data\n");
+      fprintf(stderr, "End of data\n");
       tsock_mut.unlock();
       return false;
     }
@@ -371,9 +371,9 @@ void transmitter() {
 int main(int argc, char** argv) {
   init(argc, argv);
 
-  //std::thread tthread{transmitter};
+  std::thread tthread{transmitter};
   controler();
 
-  //tthread.join();
+  tthread.join();
   return 0;
 }

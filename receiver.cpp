@@ -44,14 +44,12 @@ constexpr int DOWN_ORD = 3;
 
 /* receiver run parameters */
 uint16_t CTRL_PORT;
-uint16_t DATA_PORT;
 uint16_t UI_PORT;
 uint64_t PSIZE;
 uint64_t BSIZE;
 uint64_t RTIME;
 uint64_t MAX_PACKAGES_NO;
-char* MCAST_ADDR;
-char* dADDR;
+std::string DISCOVER_ADDR;
 
 
 /* shared (receiver && discover) */
@@ -59,6 +57,8 @@ std::vector<package_t> packages;
 uint64_t byte_zero;
 uint64_t pexp_byte; /* determinates player head position */
 uint64_t bbyte;
+
+std::atomic<bool> switch_sender;
 
 /* shared (interface && discover) */
 transmitter_t* transmitters;
@@ -83,13 +83,43 @@ int isock;
 pollfd ipoll[_POSIX_OPEN_MAX];
 sockaddr_in ilocal_addr;
 
+int64_t package_pos(uint64_t fbyte) {
+  int64_t pos;
+
+  pos = ((fbyte - byte_zero) / PSIZE) % MAX_PACKAGES_NO;
+  assert(pos >= 0 && pos < MAX_PACKAGES_NO);
+  return pos;
+}
+
+void debug_print_packages(bool play) {
+  int64_t phead_pos;
+  char white_space;
+
+  phead_pos = package_pos(pexp_byte);
+  fprintf(stderr, "play=%d\n", play);
+  for (int i = 0; i < MAX_PACKAGES_NO; ++i) {
+    if (i == phead_pos) {
+      white_space = '>';
+    } else {
+      white_space = ' ';
+    }
+
+    if (packages[i].sid != session_id) {
+      fprintf(stderr, "%c[ ]", white_space);
+    } else {
+      fprintf(stderr, "%c[%ld]", white_space, packages[i].fbyte);
+    }
+  }
+  fprintf(stderr, "\n\n");
+}
+
 void debug_print_transmitters() {
   transmitter_t *ptr;
 
-  printf("\nTransmitters:\n"); fflush(stdout);
+  fprintf(stderr, "\nTransmitters:\n"); fflush(stdout);
   ptr = transmitters;
   while (ptr) {
-    printf("%s", ptr->station_name.c_str());
+    fprintf(stderr, "%s", ptr->station_name.c_str());
     ptr = ptr->next;
   }
 
@@ -104,22 +134,15 @@ void cwrite(int sock, const char* msg, size_t msg_size) {
   }
 }
 
-int64_t package_pos(uint64_t fbyte) {
-  int64_t pos;
-
-  pos = ((fbyte - byte_zero) / PSIZE) % MAX_PACKAGES_NO;
-  assert(pos >= 0 && pos < MAX_PACKAGES_NO);
-  return pos;
-}
-
 void init(int argc, char** argv) {
   namespace po = boost::program_options;
   try {
     po::options_description desc("Allowed options");
     desc.add_options()
       ("help", "produce help message")
+      (",d", po::value<std::string>(&DISCOVER_ADDR)->default_value("255.255.255.255"))
       (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(37075), "set CTRL_PORT")
-      (",b", po::value<uint64_t>(&BSIZE)->default_value(80), "set BSIZE")
+      (",b", po::value<uint64_t>(&BSIZE)->default_value(500000), "set BSIZE")
       (",R", po::value<uint64_t>(&RTIME)->default_value(250), "set RTIME")
       (",U", po::value<uint16_t>(&UI_PORT)->default_value(17075), "set UI_PORT");
 
@@ -130,10 +153,8 @@ void init(int argc, char** argv) {
     fprintf(stderr, "Invalid program options");
   }
 
-  MCAST_ADDR = const_cast<char *>("239.10.11.12");
-  dADDR = const_cast<char *>("255.255.255.255");
-  DATA_PORT = 27075;
-  PSIZE = 10;//512;// 10;
+  DISCOVER_ADDR = const_cast<char *>("255.255.255.255");
+  PSIZE = 512;// 10;
   MAX_PACKAGES_NO = BSIZE / PSIZE;
   transmitters = nullptr;
   picked = -1;
@@ -162,7 +183,7 @@ void dinit() {
   dinfo_hints.ai_canonname = nullptr;
   dinfo_hints.ai_next = nullptr;
 
-  res = getaddrinfo(dADDR, nullptr, &dinfo_hints, &dinfo_res);
+  res = getaddrinfo(DISCOVER_ADDR.c_str(), nullptr, &dinfo_hints, &dinfo_res);
   if (res < 0) {
     fprintf(stderr, "getaddrinfo");
   }
@@ -281,7 +302,6 @@ void dreceive_replies() {
     if (rcv_len > 0) {
       buffer[rcv_len] = NULL_TERMINATOR;
       dmark_transmitter(buffer);
-      debug_print_transmitters();
     } else if (errno == EAGAIN || errno == EWOULDBLOCK || rcv_len == 0) {
       read_replies = false;
     }  else {
@@ -376,6 +396,7 @@ void discover() {
   while (true) {
     dsend_lookup();
     dreceive_replies();
+    debug_print_transmitters();
     sleep(DISCOVER_LOOKUP_NAP);
     //if (connected) {
     //  dsend_retransmition_requests();
@@ -388,36 +409,8 @@ void discover() {
  *                                                  RECEIVER                                                          *
  *--------------------------------------------------------------------------------------------------------------------*/
 void rinit() {
-  int res;
-  ip_mreq ip_mreq{};
-
-  session_id = 0;
-  byte_zero = 0;
-  pexp_byte = 0;
-
   rlocal_addr.sin_family = AF_INET;
   rlocal_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  rlocal_addr.sin_port = htons(DATA_PORT);
-
-  rsock = socket(AF_INET, SOCK_DGRAM, 0);
-  if (rsock < 0) {
-    fprintf(stderr, "receiver sock");
-  }
-
-  ip_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-  res = inet_aton(MCAST_ADDR, &ip_mreq.imr_multiaddr);
-  if (res == 0) {
-    fprintf(stderr, "receiver inet_aton");
-  }
-  res = (setsockopt(rsock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &ip_mreq, sizeof(ip_mreq)));
-  if (res < 0) {
-    fprintf(stderr, "receiver setsockopt add_membership");
-  }
-
-  res = bind(rsock, (const struct sockaddr *) &rlocal_addr, sizeof(rlocal_addr));
-  if (res < 0) {
-    fprintf(stderr, "bind receiver sock");
-  }
 
   rpoll[0].fd = rsock;
   rpoll[0].events = POLLIN;
@@ -429,28 +422,6 @@ void rmove_phead() {
   if (bbyte >= pexp_byte + MAX_PACKAGES_NO * PSIZE) {
     pexp_byte = bbyte - MAX_PACKAGES_NO * PSIZE + PSIZE;
   }
-}
-
-void debug_print_packages(bool play) {
-  int64_t phead_pos;
-  char white_space;
-
-  phead_pos = package_pos(pexp_byte);
-  fprintf(stderr, "play=%d\n", play);
-  for (int i = 0; i < MAX_PACKAGES_NO; ++i) {
-    if (i == phead_pos) {
-      white_space = '>';
-    } else {
-      white_space = ' ';
-    }
-
-    if (packages[i].sid != session_id) {
-      fprintf(stderr, "%c[ ]", white_space);
-    } else {
-      fprintf(stderr, "%c[%ld]", white_space, packages[i].fbyte);
-    }
-  }
-  fprintf(stderr, "\n\n");
 }
 
 bool rhole_in_data() {
@@ -465,7 +436,7 @@ bool rhole_in_data() {
   return packages[player_head].fbyte != pexp_byte;
 }
 
-void receiver() {
+void receive() {
   int flags, ret;
   ssize_t rcv_len;
   int64_t pos;
@@ -474,13 +445,10 @@ void receiver() {
   nuint64_t tmp_sid{};
   nuint64_t tmp_fbyte{};
 
-  rinit();
-
   flags = 0;
   play = false;
 
-  while (true) {
-    debug_print_packages(play);
+  while (!switch_sender) {
     rpoll[0].revents = 0;
     rpoll[STDOUT].revents = 0;
     ret = poll(rpoll, RPOLL_SIZE, NO_LIMIT);
@@ -538,6 +506,77 @@ void receiver() {
         write(STDOUT, packages[package_pos(pexp_byte)].data, PSIZE);
         pexp_byte += PSIZE;
       }
+    }
+  }
+
+  close(rsock);
+}
+
+void rjoin_group() {
+  int res, act_pos;
+  ip_mreq ip_mreq;
+  transmitter_t* ptr;
+  std::string mcast_addr;
+  uint16_t mcast_port;
+
+  session_id = 0;
+  byte_zero = 0;
+  pexp_byte = 0;
+
+  act_pos = 0;
+
+  trans_mut.lock();
+  if (picked == -1) {
+    trans_mut.unlock();
+    return;
+  }
+
+  rsock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (rsock < 0) {
+    fprintf(stderr, "receiver sock");
+  }
+
+  ptr = transmitters;
+  while (act_pos != picked) {
+    ptr = ptr->next;
+    act_pos++;
+  }
+
+  mcast_addr = ptr->mcast_addr;
+  mcast_port = ptr->data_port;
+
+  rlocal_addr.sin_port = htons(mcast_port);
+
+  ip_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+  res = inet_aton(mcast_addr.c_str(), &ip_mreq.imr_multiaddr);
+  if (res == 0) {
+    fprintf(stderr, "receiver inet_aton");
+  }
+
+  res = setsockopt(rsock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &ip_mreq, sizeof(ip_mreq));
+  if (res < 0) {
+    fprintf(stderr, "receiver setsockopt add_membership");
+  }
+
+  res = bind(rsock, (const struct sockaddr *) &rlocal_addr, sizeof(rlocal_addr));
+  if (res < 0) {
+    fprintf(stderr, "bind receiver sock");
+  }
+
+  rpoll[0].fd = rsock;
+  switch_sender = false;
+
+  trans_mut.unlock();
+}
+
+void receiver() {
+  rinit();
+
+  while (true) {
+    if (picked != -1) {
+      rjoin_group();
+      fprintf(stderr, "joined group\n");
+      receive();
     }
   }
 }
@@ -696,6 +735,7 @@ int iproc_order(int order, int pos) {
     case UP_ORD:
       if (picked > 0) {
         picked--;
+        switch_sender = true;
         irefresh();
       }
       break;
@@ -703,6 +743,7 @@ int iproc_order(int order, int pos) {
     case DOWN_ORD:
       if (picked < transmitters_no - 1) {
         picked++;
+        switch_sender = true;
         irefresh();
       }
       break;
@@ -755,7 +796,7 @@ int main(int argc, char** argv) {
 
   std::thread ithread{interface};
   std::thread dthread{discover};
-  //receiver();
+  receiver();
 
   ithread.join();
   dthread.join();
