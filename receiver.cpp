@@ -53,6 +53,7 @@ uint64_t BSIZE;
 uint64_t RTIME;
 uint64_t max_packages_no;
 std::string DISCOVER_ADDR;
+std::string SP_STATION;
 
 
 /* shared (receiver && discover) */
@@ -136,10 +137,11 @@ void init(int argc, char** argv) {
     desc.add_options()
       ("help", "produce help message")
       (",d", po::value<std::string>(&DISCOVER_ADDR)->default_value("255.255.255.255"))
-      (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(37075), "set CTRL_PORT")
+      (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(30758), "set CTRL_PORT")
       (",b", po::value<uint64_t>(&BSIZE)->default_value(500000), "set BSIZE")
       (",R", po::value<uint64_t>(&RTIME)->default_value(250), "set RTIME")
-      (",U", po::value<uint16_t>(&UI_PORT)->default_value(17075), "set UI_PORT");
+      (",U", po::value<uint16_t>(&UI_PORT)->default_value(10758), "set UI_PORT")
+      (",n", po::value<std::string>(&SP_STATION)->default_value(""), "set special station");
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -154,8 +156,10 @@ void init(int argc, char** argv) {
 }
 
 /* -------------------------------------------------------------------------------------------------------------------*
- *                                                  RETRANSMITTER                                                    *
- *--------------------------------------------------------------------------------------------------------------------*/
+ *                                                  RETRANSMITTER                                                     *
+ *--------------------------------------------------------------------------------------------------------------------*
+ * Retransmitter sends retransmmision requests to the sender every RTIME miliseconds.                                 *                                                                                                *
+ * -------------------------------------------------------------------------------------------------------------------*/
 void retinit() {
   int res;
 
@@ -231,7 +235,11 @@ void retransmit() {
 
 /* -------------------------------------------------------------------------------------------------------------------*
  *                                                  DISCOVER                                                          *
- *--------------------------------------------------------------------------------------------------------------------*/
+ *--------------------------------------------------------------------------------------------------------------------*
+ * Discoverer sends lookup request every 5 seconds. Then it proceeds with replies. In case it doesn't receive a reply *
+ * from transmitter for longer than MAX_NO_RESPONSE_TIME, it deletes the transmitter from a list of active            *
+ * transmitters.                                                                                                      *
+ * -------------------------------------------------------------------------------------------------------------------*/
 void dinit() {
   int broadcast_val, flags, res;
   addrinfo dinfo_hints{};
@@ -439,7 +447,12 @@ void discover() {
 
 /* -------------------------------------------------------------------------------------------------------------------*
  *                                                  RECEIVER                                                          *
- *--------------------------------------------------------------------------------------------------------------------*/
+ *--------------------------------------------------------------------------------------------------------------------*
+ * In endless loop, receiver joins multicasting group (if there is one), and starts receiving.                        *
+ * Receiving means it stores bytes into buffer, till it receives byte which is bigger than                            *
+ * byte_zero + BSIZE/PSIZE*3/4. When it happens, it starts writing all captured bytes on stdout in total speed.       *
+ * If there are any missing bytes which it would want to write, it restarts the whole capturing procedure.            *
+ * -------------------------------------------------------------------------------------------------------------------*/
 void rinit() {
   rlocal_addr.sin_family = AF_INET;
   rlocal_addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -638,7 +651,10 @@ void receiver() {
 
 /* -------------------------------------------------------------------------------------------------------------------*
  *                                                  INTERFACE                                                         *
- *--------------------------------------------------------------------------------------------------------------------*/
+ *--------------------------------------------------------------------------------------------------------------------*
+ * Interface in loop awaits for new telnet clients, reading, and proceeding with orders from them. Clients may switch *
+ * the station. Every change will be displayed to all of the clients.                                                 *
+ * -------------------------------------------------------------------------------------------------------------------*/
 void iinit() {
   int res, i;
 

@@ -143,7 +143,11 @@ void init(int argc, char** argv) {
 
 /* -------------------------------------------------------------------------------------------------------------------*
  *                                                  CONTROLER                                                         *
- *--------------------------------------------------------------------------------------------------------------------*/
+ *--------------------------------------------------------------------------------------------------------------------*
+ * Controler reads orders from receivers in a loop. We allow two types of orders: lookup, and rexmit. On lookup order,*
+ * controler sends back to receiver intoduction message (BOREWICZ_HERE MCAST_ADDR DATA_PORT STATION_NAME). On rexmit  *
+ * order, controler stores missing packages in rexmit_fresh set.                                                      *
+ * -------------------------------------------------------------------------------------------------------------------*/
 void cinit() {
   int val, res, flags;
   sockaddr_in self_address{};
@@ -269,13 +273,15 @@ void controler() {
 
 /* -------------------------------------------------------------------------------------------------------------------*
  *                                                  RETRANSMITTER                                                     *
+ *--------------------------------------------------------------------------------------------------------------------*
+ * Retransmitter sends retransmittion packages on MCAST_ADDR, if they are in still cached.                            *
  *--------------------------------------------------------------------------------------------------------------------*/
 void retransmit() {
   int64_t pos;
 
   rexmit_mut.lock();
-  rexmit_old = std::move(rexmit_fresh);
-  rexmit_fresh.clear();
+  rexmit_old.clear();
+  std::swap(rexmit_old, rexmit_fresh);
   rexmit_mut.unlock();
 
   tsock_mut.lock();
@@ -299,7 +305,10 @@ void retransmitter() {
 
 /* -------------------------------------------------------------------------------------------------------------------*
  *                                                  TRANSMITTER                                                       *
- *--------------------------------------------------------------------------------------------------------------------*/
+ *--------------------------------------------------------------------------------------------------------------------*
+ * Transmitter reads bytes from stdin, multicasting them in packages (each PSIZE) on specified MCAST_ADDR. When there *
+ * is no more input, transmitter sets data_left to false, and exits.                                                  *
+ * -------------------------------------------------------------------------------------------------------------------*/
 void tinit() {
   int res;
 
