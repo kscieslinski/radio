@@ -44,11 +44,11 @@ std::string MCAST_ADDR;
 std::string SNAME;
 
 uint64_t MAX_PACKAGES_NO;
-nuint64_t SESSION_ID;
+uint64_t SESSION_ID;
 
 /* shared */
 std::vector<package_t> packages;
-nuint64_t read_bytes;
+uint64_t read_bytes;
 bool data_left;
 
 std::unordered_set<uint64_t> rexmit_fresh;
@@ -69,7 +69,7 @@ int64_t package_pos(uint64_t fbyte) {
   int64_t head_pos, pos, package_delay;
   uint64_t tmp_read_bytes;
 
-  tmp_read_bytes = read_bytes.nuint64;
+  tmp_read_bytes = read_bytes;
   head_pos = (tmp_read_bytes / PSIZE) % MAX_PACKAGES_NO;
   package_delay = (tmp_read_bytes - fbyte) / PSIZE;
 
@@ -87,9 +87,9 @@ void send_package(package_t& package) {
   flags = 0;
   multicast_address_len = sizeof(multicast_addr);
 
-  snd_len = sendto(tsock, package.data, PSIZE + AUDIO_DATA + 1, flags,
+  snd_len = sendto(tsock, package.data, PSIZE + AUDIO_DATA, flags,
                    (const struct sockaddr *) &multicast_addr, multicast_address_len);
-  if (snd_len != PSIZE + AUDIO_DATA + 1) {
+  if (snd_len != PSIZE + AUDIO_DATA) {
     fprintf(stderr, "sendto multicaster");
   }
 }
@@ -130,16 +130,15 @@ void init(int argc, char** argv) {
   data_left = true;
 
   MAX_PACKAGES_NO = FSIZE / PSIZE;
-  SESSION_ID.nuint64 = static_cast<uint64_t>(time(nullptr));
-  read_bytes.nuint64 = 0;
+  SESSION_ID = static_cast<uint64_t>(time(nullptr));
+  read_bytes = 0;
 
   packages.resize(MAX_PACKAGES_NO);
   for (int i = 0; i < MAX_PACKAGES_NO; ++i) {
     packages[i].data = new char[PSIZE + AUDIO_DATA + 1];
     memset(packages[i].data, 0, PSIZE + AUDIO_DATA + 1);
   }
-  SESSION_ID.nuint32[0] = htonl(SESSION_ID.nuint32[0]);
-  SESSION_ID.nuint32[1] = htonl(SESSION_ID.nuint32[1]);
+  SESSION_ID = htobe64(SESSION_ID);
 }
 
 /* -------------------------------------------------------------------------------------------------------------------*
@@ -315,13 +314,13 @@ void tinit() {
 }
 
 bool tread_from_stdin() {
-  nuint64_t tmp{};
+  uint64_t tmp;
   int64_t pos;
   int c;
 
   tsock_mut.lock();
 
-  pos = package_pos(read_bytes.nuint64 + PSIZE);
+  pos = package_pos(read_bytes + PSIZE);
   package_t& package = packages[pos];
 
   memset(package.data, 0, PSIZE + AUDIO_DATA + 1);
@@ -339,13 +338,12 @@ bool tread_from_stdin() {
     package.data[AUDIO_DATA + i] = static_cast<char>(c);
   }
 
-  memcpy(package.data, SESSION_ID.nuint8, sizeof(SESSION_ID));
-  tmp.nuint32[0] = htonl(read_bytes.nuint32[0]);
-  tmp.nuint32[1] = htonl(read_bytes.nuint32[1]);
-  memcpy(&package.data[sizeof(tmp)], tmp.nuint8, sizeof(tmp));
+  memcpy(package.data, &SESSION_ID, sizeof(SESSION_ID));
+  tmp = htobe64(read_bytes);
+  memcpy(&package.data[sizeof(tmp)], &tmp, sizeof(tmp));
 
-  package.fbyte = read_bytes.nuint64;
-  read_bytes.nuint64 += PSIZE;
+  package.fbyte = read_bytes;
+  read_bytes += PSIZE;
 
   send_package(package);
 

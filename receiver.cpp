@@ -45,10 +45,9 @@ constexpr int DOWN_ORD = 3;
 /* receiver run parameters */
 uint16_t CTRL_PORT;
 uint16_t UI_PORT;
-uint64_t PSIZE;
 uint64_t BSIZE;
 uint64_t RTIME;
-uint64_t MAX_PACKAGES_NO;
+uint64_t max_packages_no;
 std::string DISCOVER_ADDR;
 
 
@@ -58,6 +57,7 @@ uint64_t byte_zero;
 uint64_t pexp_byte; /* determinates player head position */
 uint64_t bbyte;
 
+/* shared (receiver && interface) */
 std::atomic<bool> switch_sender;
 
 /* shared (interface && discover) */
@@ -67,6 +67,10 @@ std::atomic<int> transmitters_no;
 std::atomic<bool> refresh;
 std::mutex trans_mut;
 
+/* shared (receiver && retransmitter */
+int retsock;
+sockaddr_in ret_addr;
+std::mutex ret_mut;
 
 /* discover */
 int dsock;
@@ -77,6 +81,7 @@ int rsock;
 pollfd rpoll[RPOLL_SIZE];
 uint64_t session_id;
 sockaddr_in rlocal_addr;
+uint64_t psize;
 
 /* interface */
 int isock;
@@ -85,9 +90,9 @@ sockaddr_in ilocal_addr;
 
 int64_t package_pos(uint64_t fbyte) {
   int64_t pos;
-
-  pos = ((fbyte - byte_zero) / PSIZE) % MAX_PACKAGES_NO;
-  assert(pos >= 0 && pos < MAX_PACKAGES_NO);
+  assert(psize != 0);
+  pos = ((fbyte - byte_zero) / psize) % max_packages_no;
+  assert(pos >= 0 && pos < max_packages_no);
   return pos;
 }
 
@@ -96,8 +101,7 @@ void debug_print_packages(bool play) {
   char white_space;
 
   phead_pos = package_pos(pexp_byte);
-  fprintf(stderr, "play=%d\n", play);
-  for (int i = 0; i < MAX_PACKAGES_NO; ++i) {
+  for (int i = 0; i < max_packages_no; ++i) {
     if (i == phead_pos) {
       white_space = '>';
     } else {
@@ -153,15 +157,84 @@ void init(int argc, char** argv) {
     fprintf(stderr, "Invalid program options");
   }
 
-  DISCOVER_ADDR = const_cast<char *>("255.255.255.255");
-  PSIZE = 512;// 10;
-  MAX_PACKAGES_NO = BSIZE / PSIZE;
   transmitters = nullptr;
   picked = -1;
+  psize = 0;
+}
 
-  packages.resize(MAX_PACKAGES_NO);
-  for (int i = 0; i < MAX_PACKAGES_NO; ++i) {
-    packages[i].data = new char[PSIZE + 1];
+/* -------------------------------------------------------------------------------------------------------------------*
+ *                                                  RETRANSMITTER                                                    *
+ *--------------------------------------------------------------------------------------------------------------------*/
+void retinit() {
+  int res;
+
+  ret_mut.lock();
+
+  retsock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (retsock < 0) {
+    fprintf(stderr, "dsock");
+  }
+
+  ret_addr.sin_family = AF_INET;
+  rlocal_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  ret_addr.sin_port = htons(0);
+
+  res = bind(retsock, reinterpret_cast<const sockaddr *>(&ret_addr), sizeof(ret_addr));
+  if (res < 0) {
+    fprintf(stderr, "bind retransmitter");
+  }
+
+  ret_mut.unlock();
+}
+
+void ret_send_retransmition_requests() {
+  socklen_t trans_addr_len;
+  int flags;
+  ssize_t snd_len;
+  uint64_t retransmit_packages_no;
+  int64_t act_pos;
+  uint64_t act_exp_bytes;
+
+  ret_mut.lock();
+
+  act_exp_bytes = pexp_byte;
+  act_pos = package_pos(act_exp_bytes);
+  retransmit_packages_no = 0;
+  std::string request = "LOURDER_PLEASE ";
+
+  while (act_exp_bytes < bbyte) {
+    if (packages[act_pos].fbyte != act_exp_bytes) {
+      retransmit_packages_no++;
+      request += std::to_string(act_exp_bytes) + ",";
+    }
+    act_pos = next(1, act_pos, max_packages_no);
+    act_exp_bytes += psize;
+  }
+
+  if (retransmit_packages_no == 0) {
+    ret_mut.unlock();
+    return;
+  }
+
+  request[request.size() - 1] = EOL; /* delete last coma */
+  trans_addr_len = sizeof(dremote_addr);
+  flags = 0;
+  snd_len = sendto(retsock, request.c_str(), request.size(), flags, (const struct sockaddr *) &ret_addr,
+                   trans_addr_len);
+  if (snd_len != request.size()) {
+    fprintf(stderr, "partial/failed write");
+  }
+
+  ret_mut.unlock();
+}
+
+void retransmit() {
+  retinit();
+  while (true) {
+    if (picked != -1 && psize != 0) {
+      ret_send_retransmition_requests();
+    }
+    usleep(static_cast<__useconds_t>(RTIME));
   }
 }
 
@@ -312,42 +385,6 @@ void dreceive_replies() {
   trans_mut.unlock();
 }
 
-void dsend_retransmition_requests() {
-  socklen_t dremote_addr_len;
-  int flags;
-  ssize_t snd_len;
-  uint64_t retransmit_packages_no;
-  int64_t act_pos;
-  uint64_t act_exp_bytes;
-
-  act_exp_bytes = pexp_byte;
-  act_pos = package_pos(act_exp_bytes);
-  retransmit_packages_no = 0;
-  std::string request = "LOURDER_PLEASE ";
-
-  while (act_exp_bytes < bbyte) {
-    if (packages[act_pos].fbyte != act_exp_bytes) {
-      retransmit_packages_no++;
-      request += std::to_string(act_exp_bytes) + ",";
-    }
-    act_pos = next(1, act_pos, MAX_PACKAGES_NO);
-    act_exp_bytes += PSIZE;
-  }
-
-  if (retransmit_packages_no == 0) {
-    return;
-  }
-
-  request[request.size() - 1] = EOL; /* delete last coma */
-  dremote_addr_len = sizeof(dremote_addr);
-  flags = 0;
-  snd_len = sendto(dsock, request.c_str(), request.size(), flags, (const struct sockaddr *) &dremote_addr,
-                   dremote_addr_len);
-  if (snd_len != request.size()) {
-    fprintf(stderr, "partial/failed write");
-  }
-}
-
 void dremove_unused_transmitters() {
   struct transmitter_t* front;
   struct transmitter_t* back;
@@ -389,8 +426,10 @@ void dremove_unused_transmitters() {
     if (picked == 0) {
       switch_sender = true;
     }
-    picked--;
     transmitters_no--;
+    if (transmitters_no == 0) {
+      picked--;
+    }
     refresh = true;
     delete(front);
   }
@@ -402,15 +441,13 @@ void discover() {
   while (true) {
     dsend_lookup();
     dreceive_replies();
-    //debug_print_transmitters();
     sleep(DISCOVER_LOOKUP_NAP);
-    //if (connected) {
-    //  dsend_retransmition_requests();
-    //}
-    //usleep(static_cast<__useconds_t>(RTIME));
+
     dremove_unused_transmitters();
   }
 }
+
+
 /* -------------------------------------------------------------------------------------------------------------------*
  *                                                  RECEIVER                                                          *
  *--------------------------------------------------------------------------------------------------------------------*/
@@ -425,8 +462,8 @@ void rinit() {
 }
 
 void rmove_phead() {
-  if (bbyte >= pexp_byte + MAX_PACKAGES_NO * PSIZE) {
-    pexp_byte = bbyte - MAX_PACKAGES_NO * PSIZE + PSIZE;
+  if (bbyte >= pexp_byte + max_packages_no * psize) {
+    pexp_byte = bbyte - max_packages_no * psize + psize;
   }
 }
 
@@ -442,17 +479,36 @@ bool rhole_in_data() {
   return packages[player_head].fbyte != pexp_byte;
 }
 
+void rresize_buffor() {
+  int i;
+
+  for (i = 0; i < packages.size(); ++i) {
+    delete[](packages[i].data);
+  }
+  packages.clear();
+
+  max_packages_no = BSIZE / psize;
+  packages.resize(max_packages_no);
+  
+  for (i = 0; i < packages.size(); ++i) {
+    packages[i].data = new char[psize + 1];
+  }
+}
+
 void receive() {
   int flags, ret;
   ssize_t rcv_len;
   int64_t pos;
-  char message[PSIZE + AUDIO_DATA + 1];
+  char message[BUF_SIZE + 1];
   bool play;
-  nuint64_t tmp_sid{};
-  nuint64_t tmp_fbyte{};
+  uint64_t tmp_sid;
+  uint64_t tmp_fbyte;
+  sockaddr_in transmitter_addr;
+  socklen_t transmitter_addr_len;
 
   flags = 0;
   play = false;
+  transmitter_addr_len = sizeof(transmitter_addr);
 
   while (!switch_sender) {
     rpoll[0].revents = 0;
@@ -463,32 +519,36 @@ void receive() {
     }
 
     if (rpoll[0].revents & POLLIN) {
-      rcv_len = recvfrom(rsock, message, PSIZE + AUDIO_DATA + 1, flags, nullptr, nullptr);
+      memset(message, 0, sizeof(message));
+      rcv_len = recvfrom(rsock, message, BUF_SIZE, flags,
+                         reinterpret_cast<sockaddr *>(&transmitter_addr), &transmitter_addr_len);
       if (rcv_len > 0) {
-        memcpy(tmp_sid.nuint8, message, sizeof(uint64_t));
-        tmp_sid.nuint32[0] = ntohl(tmp_sid.nuint32[0]);
-        tmp_sid.nuint32[1] = ntohl(tmp_sid.nuint32[1]);
+        memcpy(&tmp_sid, message, sizeof(uint64_t));
+        tmp_sid = be64toh(tmp_sid);
 
-        memcpy(tmp_fbyte.nuint8, &message[sizeof(uint64_t)], sizeof(uint64_t));
-        tmp_fbyte.nuint32[0] = ntohl(tmp_fbyte.nuint32[0]);
-        tmp_fbyte.nuint32[1] = ntohl(tmp_fbyte.nuint32[1]);
+        memcpy(&tmp_fbyte, &message[sizeof(uint64_t)], sizeof(uint64_t));
+        tmp_fbyte = be64toh(tmp_fbyte);
 
-        if (tmp_sid.nuint64 < session_id || tmp_fbyte.nuint64 < pexp_byte) {
+        if (tmp_sid < session_id || tmp_fbyte < pexp_byte) {
           continue;
-        } else if (tmp_sid.nuint64 > session_id) {
-          session_id = tmp_sid.nuint64;
-          pexp_byte = bbyte = byte_zero = tmp_fbyte.nuint64;
+        } else if (tmp_sid > session_id) {
+          trans_mut.lock();
+          session_id = tmp_sid;
+          pexp_byte = bbyte = byte_zero = tmp_fbyte;
           play = false;
           rpoll[STDOUT].events = 0;
-          fprintf(stderr, "\nSETTING: %ld\n", byte_zero);
+          psize = static_cast<uint64_t>(rcv_len - AUDIO_DATA);
+          ret_addr = transmitter_addr;
+          rresize_buffor();
+          trans_mut.unlock();
         }
 
-        pos = package_pos(tmp_fbyte.nuint64);
+        pos = package_pos(tmp_fbyte);
         package_t &package = packages[pos];
 
-        package.sid = tmp_sid.nuint64;
-        package.fbyte = tmp_fbyte.nuint64;
-        memcpy(package.data, &message[AUDIO_DATA], PSIZE);
+        package.sid = tmp_sid;
+        package.fbyte = tmp_fbyte;
+        memcpy(package.data, &message[AUDIO_DATA], psize);
 
         if (package.fbyte > bbyte) {
           bbyte = package.fbyte;
@@ -509,8 +569,8 @@ void receive() {
         play = false;
         rpoll[STDOUT].events = 0;
       } else {
-        write(STDOUT, packages[package_pos(pexp_byte)].data, PSIZE);
-        pexp_byte += PSIZE;
+        write(STDOUT, packages[package_pos(pexp_byte)].data, psize);
+        pexp_byte += psize;
       }
     }
   }
@@ -581,11 +641,11 @@ void receiver() {
   while (true) {
     if (picked != -1) {
       rjoin_group();
-      fprintf(stderr, "joined group\n");
       receive();
     }
   }
 }
+
 
 /* -------------------------------------------------------------------------------------------------------------------*
  *                                                  INTERFACE                                                         *
@@ -809,6 +869,7 @@ void interface() {
 int main(int argc, char** argv) {
   init(argc, argv);
 
+  std::thread rthread{retransmit};
   std::thread ithread{interface};
   std::thread dthread{discover};
   receiver();
