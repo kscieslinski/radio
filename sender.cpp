@@ -18,13 +18,13 @@
 #include <regex>
 #include <iostream>
 
+#include "err.h"
 #include "helper.h"
 
 
 constexpr short LOOKUP_ORD = 1;
 constexpr short REXMIT_ORD = 2;
 constexpr short NO_ORD = 3;
-constexpr short TRANSMITTER_NAP = 1;
 const std::regex lookup_pattern("^ZERO_SEVEN_COME_IN\n$");
 const std::regex rexmit_pattern("^REXMIT (\\d[0-9]*,)*+\\d[0-9]*\n$");
 
@@ -90,7 +90,7 @@ void send_package(package_t& package) {
   snd_len = sendto(tsock, package.data, PSIZE + AUDIO_DATA, flags,
                    (const struct sockaddr *) &multicast_addr, multicast_address_len);
   if (snd_len != PSIZE + AUDIO_DATA) {
-    fprintf(stderr, "sendto multicaster");
+    std::cerr << "sendto multicaster" << std::endl;
   }
 }
 
@@ -113,18 +113,16 @@ void init(int argc, char** argv) {
     po::store(po::parse_command_line(argc, argv, desc), vm);
 
     if (vm.count("help")) {
-      std::cout << "Sender" << std::endl << desc << std::endl;
+      std::cerr << "Sender" << std::endl << desc << std::endl;
       exit(0);
     }
 
     po::notify(vm);
     if (PSIZE == 0 || !inet_aton(MCAST_ADDR.c_str(), &multicast_addr.sin_addr)) {
-      std::cerr << "Invalid program options" << std::endl;
-      exit(1);
+      syserr("Invalid program options");
     }
   } catch (std::exception& e) {
-    fprintf(stderr, "Invalid program options\n");
-    exit(1);
+    syserr("Invalid program options");
   }
 
   data_left = true;
@@ -154,22 +152,22 @@ void cinit() {
 
   csock = socket(AF_INET, SOCK_DGRAM, 0);
   if (csock < 0) {
-    fprintf(stderr, "ctrl_sock");
+    syserr("ctrl_sock");
   }
 
   val = 1;
   if (setsockopt(csock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
-    fprintf(stderr, "reusing csock");
+    syserr("reusing socket");
   }
 
   res = setsockopt(csock, SOL_SOCKET, SO_BROADCAST, &val, sizeof(val));
   if (res < 0) {
-    fprintf(stderr, "setsockopt SO_BROADCAST");
+    syserr("setsockopt SO_BROADCAST");
   }
 
   res = bind(csock, (struct sockaddr*) &self_address, (socklen_t) sizeof(self_address));
   if (res < 0) {
-    fprintf(stderr, "bind crtl_sock");
+    syserr("bind ctrl_sock");
   }
 
 }
@@ -184,11 +182,10 @@ int cread_order(sockaddr_in& rec_addr, char* buff) {
 
   rec_bytes = recvfrom(csock, buff, BUF_SIZE, flags, (struct sockaddr *) &rec_addr, &rec_addr_len);
   if (rec_bytes < 0) {
-    fprintf(stderr, "error on datagram from ctrl sock");
+    std::cerr << "error on datagram from ctrl sock" << std::endl;
   }
 
   buff[rec_bytes] = NULL_TERMINATOR;
-  fprintf(stderr, "CTRL: %s", buff);
   if (std::regex_match(buff, lookup_pattern)) {
     return LOOKUP_ORD;
   } else if (std::regex_match(buff, rexmit_pattern)) {
@@ -210,7 +207,7 @@ void cperform_lookup_ord(struct sockaddr_in& rec_addr) {
 
   snd_len = sendto(csock, reply.c_str(), reply.size(), flags, (const struct sockaddr *) &rec_addr, rec_addr_len);
   if (snd_len != reply.size()) {
-    fprintf(stderr, "sendto lookup");
+    std::cerr << "sendto lookup" << std::endl;
   }
 }
 
@@ -257,7 +254,7 @@ void controler() {
   char buff[BUF_SIZE + 1];
   cinit();
 
-  while (true)/*(data_left)*/ {
+  while (data_left) {
     memset(buff, 0, BUF_SIZE + 1);
     order = cread_order(rec_addr, buff);
     cperform_order(static_cast<short>(order), buff, rec_addr);
@@ -302,14 +299,14 @@ void tinit() {
 
   tsock = socket(AF_INET, SOCK_DGRAM, 0);
   if (tsock < 0) {
-    fprintf(stderr, "multi sock");
+    syserr("multi sock");
   }
 
   multicast_addr.sin_family = AF_INET;
   multicast_addr.sin_port = htons(DATA_PORT);
   res = inet_aton(MCAST_ADDR.c_str(), &multicast_addr.sin_addr);
   if (res < 0) {
-    fprintf(stderr, "inet aton");
+    syserr("inet_aton");
   }
 }
 
@@ -330,7 +327,6 @@ bool tread_from_stdin() {
   for (int i = 0; i < PSIZE; ++i) {
     c = getchar();
     if (c == EOF) {
-      fprintf(stderr, "End of data\n");
       tsock_mut.unlock();
       return false;
     }

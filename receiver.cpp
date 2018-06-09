@@ -14,7 +14,9 @@
 #include <boost/program_options.hpp>
 #include <atomic>
 #include <mutex>
+#include <iostream>
 #include "helper.h"
+#include "err.h"
 
 
 struct package_t {
@@ -40,7 +42,7 @@ constexpr int CENTRAL = 0;
 constexpr int CLOSE_CON_ORDER = 1;
 constexpr int UP_ORD = 2;
 constexpr int DOWN_ORD = 3;
-
+constexpr int INTERFACE_REFRESH_TIME = 300;
 
 /* receiver run parameters */
 uint16_t CTRL_PORT;
@@ -88,6 +90,16 @@ int isock;
 pollfd ipoll[_POSIX_OPEN_MAX];
 sockaddr_in ilocal_addr;
 
+
+void cwrite(int sock, const char* msg, size_t msg_size) {
+  ssize_t len;
+
+  len = write(sock, msg, msg_size);
+  if (len != msg_size) {
+    std::cerr << "writing to socket interface" << std::endl;
+  }
+}
+
 int64_t package_pos(uint64_t fbyte) {
   int64_t pos;
   assert(psize != 0);
@@ -109,33 +121,24 @@ void debug_print_packages(bool play) {
     }
 
     if (packages[i].sid != session_id) {
-      fprintf(stderr, "%c[ ]", white_space);
+      std::cerr << std::to_string(white_space) + "[ ]";
     } else {
-      fprintf(stderr, "%c[%ld]", white_space, packages[i].fbyte);
+      std::cerr << std::to_string(white_space) + "[" + std::to_string(packages[i].fbyte) + "]";
     }
   }
-  fprintf(stderr, "\n\n");
+  std::cerr << std::endl << std::endl;
 }
 
 void debug_print_transmitters() {
   transmitter_t *ptr;
 
-  fprintf(stderr, "\nTransmitters:\n"); fflush(stdout);
+  std::cerr << std::endl << "Transmitters:" << std::endl;
   ptr = transmitters;
   while (ptr) {
-    fprintf(stderr, "%s", ptr->station_name.c_str());
+    std::cerr << ptr->station_name;
     ptr = ptr->next;
   }
 
-}
-
-void cwrite(int sock, const char* msg, size_t msg_size) {
-  ssize_t len;
-
-  len = write(sock, msg, msg_size);
-  if (len != msg_size) {
-    fprintf(stderr, "writing to socket interface\n");
-  }
 }
 
 void init(int argc, char** argv) {
@@ -154,7 +157,7 @@ void init(int argc, char** argv) {
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm);
   } catch (std::exception& e) {
-    fprintf(stderr, "Invalid program options");
+    syserr("Invalid program options");
   }
 
   transmitters = nullptr;
@@ -172,7 +175,7 @@ void retinit() {
 
   retsock = socket(AF_INET, SOCK_DGRAM, 0);
   if (retsock < 0) {
-    fprintf(stderr, "dsock");
+    syserr("retsock");
   }
 
   ret_addr.sin_family = AF_INET;
@@ -181,7 +184,7 @@ void retinit() {
 
   res = bind(retsock, reinterpret_cast<const sockaddr *>(&ret_addr), sizeof(ret_addr));
   if (res < 0) {
-    fprintf(stderr, "bind retransmitter");
+    syserr("bind retsock");
   }
 
   ret_mut.unlock();
@@ -222,7 +225,7 @@ void ret_send_retransmition_requests() {
   snd_len = sendto(retsock, request.c_str(), request.size(), flags, (const struct sockaddr *) &ret_addr,
                    trans_addr_len);
   if (snd_len != request.size()) {
-    fprintf(stderr, "partial/failed write");
+    std::cerr << "partial/failed write" << std::endl;
   }
 
   ret_mut.unlock();
@@ -258,7 +261,7 @@ void dinit() {
 
   res = getaddrinfo(DISCOVER_ADDR.c_str(), nullptr, &dinfo_hints, &dinfo_res);
   if (res < 0) {
-    fprintf(stderr, "getaddrinfo");
+    syserr("getaddrinfo");
   }
   dremote_addr.sin_family = AF_INET;
   dremote_addr.sin_addr.s_addr = ((struct sockaddr_in*) dinfo_res->ai_addr)->sin_addr.s_addr;
@@ -268,13 +271,13 @@ void dinit() {
 
   dsock = socket(AF_INET, SOCK_DGRAM, 0);
   if (dsock < 0) {
-    fprintf(stderr, "dsock");
+    syserr("dsock");
   }
 
   broadcast_val = 1;
   res = setsockopt(dsock, SOL_SOCKET, SO_BROADCAST, &broadcast_val, sizeof(broadcast_val));
   if (res < 0) {
-    fprintf(stderr, "setsockopt SO_BROADCAST");
+    syserr("setsockopt SO_BROADCAST");
   }
 
   flags = fcntl(dsock, F_GETFL, 0);
@@ -296,7 +299,7 @@ void dsend_lookup() {
   snd_len = sendto(dsock, request.c_str(), request.size(), flags, (const struct sockaddr *) &dremote_addr,
                    dremote_addr_len);
   if (snd_len != request.size()) {
-    fprintf(stderr, "partial/failed write");
+    std::cerr << "partial/failed write" << std::endl;
   }
 }
 
@@ -378,7 +381,7 @@ void dreceive_replies() {
     } else if (errno == EAGAIN || errno == EWOULDBLOCK || rcv_len == 0) {
       read_replies = false;
     }  else {
-      fprintf(stderr, "recvfrom discover socket");
+      std::cerr << "recvfrom discover socket" << std::endl;
     }
   } while (read_replies);
 
@@ -515,7 +518,7 @@ void receive() {
     rpoll[STDOUT].revents = 0;
     ret = poll(rpoll, RPOLL_SIZE, NO_LIMIT);
     if (ret < 0) {
-      fprintf(stderr, "receiver ret");
+      std::cerr << "poll" << std::endl;
     }
 
     if (rpoll[0].revents & POLLIN) {
@@ -559,7 +562,7 @@ void receive() {
           }
         }
       } else if (rcv_len < 0 && !(errno == EAGAIN || errno == EWOULDBLOCK)) {
-        fprintf(stderr, "recvfrom receiver socket");
+        std::cerr << "recvfrom receiver socket" << std::endl;
       }
     }
 
@@ -599,7 +602,7 @@ void rjoin_group() {
 
   rsock = socket(AF_INET, SOCK_DGRAM, 0);
   if (rsock < 0) {
-    fprintf(stderr, "receiver sock");
+    syserr("receiver sock");
   }
 
   ptr = transmitters;
@@ -616,17 +619,17 @@ void rjoin_group() {
   ip_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
   res = inet_aton(mcast_addr.c_str(), &ip_mreq.imr_multiaddr);
   if (res == 0) {
-    fprintf(stderr, "receiver inet_aton");
+    syserr("receiver inet_aton");
   }
 
   res = setsockopt(rsock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &ip_mreq, sizeof(ip_mreq));
   if (res < 0) {
-    fprintf(stderr, "receiver setsockopt add_membership");
+    syserr("receiver setsockopt add_membership");
   }
 
   res = bind(rsock, (const struct sockaddr *) &rlocal_addr, sizeof(rlocal_addr));
   if (res < 0) {
-    fprintf(stderr, "bind receiver sock");
+    syserr("bind receiver sock");
   }
 
   rpoll[0].fd = rsock;
@@ -657,7 +660,7 @@ void iinit() {
 
   isock = socket(PF_INET, SOCK_STREAM, 0);
   if (isock < 0) {
-    fprintf(stderr, "sock interface");
+    syserr("sock interface");
   }
 
   ilocal_addr.sin_family = AF_INET;
@@ -666,12 +669,12 @@ void iinit() {
 
   res = bind(isock, reinterpret_cast<const sockaddr *>(&ilocal_addr), sizeof ilocal_addr);
   if (res < 0) {
-    fprintf(stderr, "bind interface");
+    syserr("bind interface");
   }
 
   res = listen(isock, QUEUE_LNG);
   if (res == -1) {
-    fprintf(stderr, "listen interface");
+    syserr("listen interface");
   }
 
   for (i = 0; i < _POSIX_OPEN_MAX; ++i) {
@@ -694,7 +697,7 @@ void iconfigure_telnet(int sock) {
 
   res = read(sock, buf, BUF_SMALL_SIZE);
   if (res < 0) {
-    fprintf(stderr, "reading from socket");
+    std::cerr << "reading from socket" << std::endl;
   }
 }
 
@@ -704,7 +707,6 @@ std::string iget_menu() {
   std::string res, header, footer, info;
 
   trans_mut.lock();
-  info = "picked=" + std::to_string(picked) + " transmitters_no=" + std::to_string(transmitters_no) + "\n\r";
   res.append(info);
   header = "------------------------------------------------------------------------\n\r"
            "  SIK Radio\n\r"
@@ -751,7 +753,7 @@ void iadd_client() {
 
   client_sock = accept(isock, 0, 0);
   if (client_sock < 0) {
-    fprintf(stderr, "accept interface");
+    syserr("accept interface");
   }
 
   for (i = 1; i < _POSIX_OPEN_MAX; ++i) {
@@ -764,10 +766,10 @@ void iadd_client() {
     }
   }
 
-  fprintf(stderr, "to many clients interface");
+  std::cerr << "to many clients interface" << std::endl;
   res = close(client_sock);
   if (res < 0) {
-    fprintf(stderr, "close interface");
+    std::cerr << "close client socket" << std::endl;
   }
 }
 
@@ -781,7 +783,7 @@ int iread_order(int sock) {
   while (true) {
     rcv_bytes = read(sock, &c, 1);
     if (rcv_bytes < 0) {
-      fprintf(stderr, "read order interface");
+      std::cerr << "read interface" << std::endl;
     }
     if (rcv_bytes == 0) {
       return CLOSE_CON_ORDER;
@@ -824,7 +826,7 @@ int iproc_order(int order, int pos) {
       break;
 
     default:
-      fprintf(stderr, "order interface");
+      std::cerr << "order interface" << std::endl;
       break;
   }
 }
@@ -844,9 +846,9 @@ void interface() {
       irefresh();
     }
 
-    ret = poll(ipoll, _POSIX_OPEN_MAX, 300);
+    ret = poll(ipoll, _POSIX_OPEN_MAX, INTERFACE_REFRESH_TIME);
     if (ret < 0) {
-      fprintf(stderr, "poll interface");
+      std::cerr << "poll interface" << std::endl;
     }
 
     if (ipoll[CENTRAL].revents & POLLIN) {
