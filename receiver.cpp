@@ -260,8 +260,8 @@ void dmark_transmitter(char* buffer) {
     pos++;
   }
 
-  if (fptr && fptr->station_name.compare(transmitter->station_name) == 0) {
-    transmitter->last_heard = 0;
+  if (fptr && fptr->mcast_addr.compare(transmitter->mcast_addr) == 0) {
+    fptr->last_heard = 0;
     delete(transmitter);
     return;
   }
@@ -274,7 +274,7 @@ void dmark_transmitter(char* buffer) {
     transmitter->next = fptr;
   }
 
-  if (pos < picked || picked == -1) {
+  if (pos <= picked || picked == -1) {
     picked++;
   }
   transmitters_no++;
@@ -366,6 +366,9 @@ void dremove_unused_transmitters() {
     if (front->last_heard > MAX_NO_RESPONSE_TIME) {
       back->next = front->next;
       if (pos <= picked) {
+        if (pos == picked) {
+          switch_sender = true;
+        }
         picked--;
       }
       transmitters_no--;
@@ -383,6 +386,9 @@ void dremove_unused_transmitters() {
   if (transmitters->last_heard > MAX_NO_RESPONSE_TIME) {
     front = transmitters;
     transmitters = transmitters->next;
+    if (picked == 0) {
+      switch_sender = true;
+    }
     picked--;
     transmitters_no--;
     refresh = true;
@@ -396,7 +402,7 @@ void discover() {
   while (true) {
     dsend_lookup();
     dreceive_replies();
-    debug_print_transmitters();
+    //debug_print_transmitters();
     sleep(DISCOVER_LOOKUP_NAP);
     //if (connected) {
     //  dsend_retransmition_requests();
@@ -617,11 +623,19 @@ void iinit() {
 }
 
 void iconfigure_telnet(int sock) {
+  char buf[BUF_SMALL_SIZE + 1];
+  ssize_t res;
+
   std::string IAC_WILL_ECHO_SGA = "\377\373\001\377\373\003";
   std::string HIDE_CURSOR = "\e[?25l\n\r";
 
   cwrite(sock, IAC_WILL_ECHO_SGA.c_str(), IAC_WILL_ECHO_SGA.size());
   cwrite(sock, HIDE_CURSOR.c_str(), HIDE_CURSOR.size());
+
+  res = read(sock, buf, BUF_SMALL_SIZE);
+  if (res < 0) {
+    fprintf(stderr, "reading from socket");
+  }
 }
 
 std::string iget_menu() {
@@ -728,6 +742,7 @@ int iread_order(int sock) {
 int iproc_order(int order, int pos) {
   switch (order) {
     case CLOSE_CON_ORDER:
+      close(ipoll[pos].fd);
       ipoll[pos].fd = NOT_USED;
       ipoll[pos].revents = 0;
       break;
