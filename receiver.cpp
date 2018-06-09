@@ -15,6 +15,7 @@
 #include <atomic>
 #include <mutex>
 #include <iostream>
+#include <regex>
 #include "helper.h"
 #include "err.h"
 
@@ -43,6 +44,7 @@ constexpr int CLOSE_CON_ORDER = 1;
 constexpr int UP_ORD = 2;
 constexpr int DOWN_ORD = 3;
 constexpr int INTERFACE_REFRESH_TIME = 300;
+
 
 /* receiver run parameters */
 uint16_t CTRL_PORT;
@@ -91,54 +93,40 @@ pollfd ipoll[_POSIX_OPEN_MAX];
 sockaddr_in ilocal_addr;
 
 
+void fill_transmitter(char* buff, transmitter_t* transmitter) {
+  unsigned long i;
+  std::string input;
+  input = std::string(buff);
+
+  std::vector<unsigned long> pos;
+  for (i = 0; i < input.size(); ++i) {
+    if (input[i] == ' ') {
+      pos.push_back(i);
+      if (pos.size() == 3) {
+        break;
+      }
+    }
+  }
+
+  transmitter->mcast_addr = input.substr((pos[0] + 1), (pos[1] - pos[0] - 1));
+  transmitter->data_port = static_cast<uint16_t>(std::stoi(input.substr((pos[1] + 1), (pos[2] - pos[1] - 1))));
+  transmitter->station_name = input.substr((pos[2] + 1), input.size() - pos[2] - 2);
+}
+
 void cwrite(int sock, const char* msg, size_t msg_size) {
   ssize_t len;
 
   len = write(sock, msg, msg_size);
-  if (len != msg_size) {
+  if (len != (ssize_t) msg_size) {
     std::cerr << "writing to socket interface" << std::endl;
   }
 }
 
 int64_t package_pos(uint64_t fbyte) {
   int64_t pos;
-  assert(psize != 0);
+
   pos = ((fbyte - byte_zero) / psize) % max_packages_no;
-  assert(pos >= 0 && pos < max_packages_no);
   return pos;
-}
-
-void debug_print_packages(bool play) {
-  int64_t phead_pos;
-  char white_space;
-
-  phead_pos = package_pos(pexp_byte);
-  for (int i = 0; i < max_packages_no; ++i) {
-    if (i == phead_pos) {
-      white_space = '>';
-    } else {
-      white_space = ' ';
-    }
-
-    if (packages[i].sid != session_id) {
-      std::cerr << std::to_string(white_space) + "[ ]";
-    } else {
-      std::cerr << std::to_string(white_space) + "[" + std::to_string(packages[i].fbyte) + "]";
-    }
-  }
-  std::cerr << std::endl << std::endl;
-}
-
-void debug_print_transmitters() {
-  transmitter_t *ptr;
-
-  std::cerr << std::endl << "Transmitters:" << std::endl;
-  ptr = transmitters;
-  while (ptr) {
-    std::cerr << ptr->station_name;
-    ptr = ptr->next;
-  }
-
 }
 
 void init(int argc, char** argv) {
@@ -224,7 +212,7 @@ void ret_send_retransmition_requests() {
   flags = 0;
   snd_len = sendto(retsock, request.c_str(), request.size(), flags, (const struct sockaddr *) &ret_addr,
                    trans_addr_len);
-  if (snd_len != request.size()) {
+  if (snd_len != (ssize_t) request.size()) {
     std::cerr << "partial/failed write" << std::endl;
   }
 
@@ -298,7 +286,7 @@ void dsend_lookup() {
 
   snd_len = sendto(dsock, request.c_str(), request.size(), flags, (const struct sockaddr *) &dremote_addr,
                    dremote_addr_len);
-  if (snd_len != request.size()) {
+  if (snd_len != (ssize_t) request.size()) {
     std::cerr << "partial/failed write" << std::endl;
   }
 }
@@ -308,16 +296,10 @@ void dmark_transmitter(char* buffer) {
   transmitter_t *bptr;
   transmitter_t *transmitter;
   int pos;
-  const char* delimiter;
 
   transmitter = new transmitter_t();
   transmitter->next = nullptr;
-  delimiter = " ";
-
-  strtok(buffer, delimiter);
-  transmitter->mcast_addr = std::string(strtok(nullptr, delimiter));
-  transmitter->data_port = static_cast<uint16_t>(std::stoi(strtok(nullptr, delimiter)));
-  transmitter->station_name = std::string(strtok(nullptr, delimiter));
+  fill_transmitter(buffer, transmitter);
 
   if (!transmitters) {
     transmitters = transmitter;
@@ -336,10 +318,14 @@ void dmark_transmitter(char* buffer) {
     pos++;
   }
 
-  if (fptr && fptr->mcast_addr.compare(transmitter->mcast_addr) == 0) {
-    fptr->last_heard = 0;
-    delete(transmitter);
-    return;
+  while (fptr && fptr->station_name.compare(transmitter->station_name) == 0) {
+    if (fptr->mcast_addr.compare(transmitter->mcast_addr) == 0) {
+      fptr->last_heard = 0;
+      delete (transmitter);
+      return;
+    }
+    bptr = fptr;
+    fptr = fptr->next;
   }
 
   if (!bptr) {
@@ -483,7 +469,7 @@ bool rhole_in_data() {
 }
 
 void rresize_buffor() {
-  int i;
+  uint64_t i;
 
   for (i = 0; i < packages.size(); ++i) {
     delete[](packages[i].data);
@@ -702,7 +688,7 @@ void iconfigure_telnet(int sock) {
 }
 
 std::string iget_menu() {
-  uint64_t act_pos;
+  int act_pos;
   transmitter_t* ptr;
   std::string res, header, footer, info;
 
@@ -720,9 +706,9 @@ std::string iget_menu() {
 
   while (ptr) {
     if (act_pos == picked) {
-      res.append("   >" + ptr->station_name + "\r");
+      res.append("   >" + ptr->station_name + "\n\r");
     } else {
-      res.append("    " + ptr->station_name + "\r");
+      res.append("    " + ptr->station_name + "\n\r");
     }
     ptr = ptr->next;
     act_pos++;
@@ -801,7 +787,7 @@ int iread_order(int sock) {
   }
 }
 
-int iproc_order(int order, int pos) {
+void iproc_order(int order, int pos) {
   switch (order) {
     case CLOSE_CON_ORDER:
       close(ipoll[pos].fd);

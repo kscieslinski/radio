@@ -5,7 +5,7 @@ find_package (Threads REQUIRED)
 find_package (Boost 1.40 REQUIRED COMPONENTS program_options)
 
 set(CMAKE_CXX_STANDARD 14)
-#set (CMAKE_CXX_FLAGS "-Wall -Wextra")
+set (CMAKE_CXX_FLAGS "-Wall -Wextra")
 
 
 # http://stackoverflow.com/questions/10555706/

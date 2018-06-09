@@ -17,6 +17,7 @@
 #include "boost/program_options.hpp"
 #include <regex>
 #include <iostream>
+#include <fcntl.h>
 
 #include "err.h"
 #include "helper.h"
@@ -74,7 +75,6 @@ int64_t package_pos(uint64_t fbyte) {
   package_delay = (tmp_read_bytes - fbyte) / PSIZE;
 
   pos = prev(package_delay, head_pos, MAX_PACKAGES_NO);
-  assert(pos >= 0 && pos < MAX_PACKAGES_NO);
 
   return pos;
 }
@@ -89,7 +89,7 @@ void send_package(package_t& package) {
 
   snd_len = sendto(tsock, package.data, PSIZE + AUDIO_DATA, flags,
                    (const struct sockaddr *) &multicast_addr, multicast_address_len);
-  if (snd_len != PSIZE + AUDIO_DATA) {
+  if (snd_len != (ssize_t) (PSIZE + AUDIO_DATA)) {
     std::cerr << "sendto multicaster" << std::endl;
   }
 }
@@ -101,13 +101,13 @@ void init(int argc, char** argv) {
     po::options_description desc("Allowed options");
     desc.add_options()
       ("help", "produce help message")
-      (",a", po::value<std::string>(&MCAST_ADDR)->required()->default_value("239.10.11.12"), "set MCAST_ADDR")
-      (",P", po::value<uint16_t>(&DATA_PORT)->default_value(27075), "set DATA_PORT")
-      (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(37075), "set CTRL_PORT")
+      (",a", po::value<std::string>(&MCAST_ADDR)->required(), "set MCAST_ADDR")
+      (",P", po::value<uint16_t>(&DATA_PORT)->default_value(20758), "set DATA_PORT")
+      (",C", po::value<uint16_t>(&CTRL_PORT)->default_value(30758), "set CTRL_PORT")
       (",p", po::value<uint64_t>(&PSIZE)->default_value(512), "set PSIZE")
       (",f", po::value<uint64_t>(&FSIZE)->default_value(128000), "set FSIZE")
       (",R", po::value<uint64_t>(&RTIME)->default_value(250), "set RTIME")
-      (",n", po::value<std::string>(&SNAME)->default_value("Nienazwany"));
+      (",n", po::value<std::string>(&SNAME)->default_value("Nienazwany nadajnik"));
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -118,7 +118,9 @@ void init(int argc, char** argv) {
     }
 
     po::notify(vm);
-    if (PSIZE == 0 || !inet_aton(MCAST_ADDR.c_str(), &multicast_addr.sin_addr)) {
+    if (PSIZE == 0 ||
+        !inet_aton(MCAST_ADDR.c_str(), &multicast_addr.sin_addr) ||
+        !IN_MULTICAST(ntohl(inet_addr(MCAST_ADDR.c_str())))) {
       syserr("Invalid program options");
     }
   } catch (std::exception& e) {
@@ -132,7 +134,7 @@ void init(int argc, char** argv) {
   read_bytes = 0;
 
   packages.resize(MAX_PACKAGES_NO);
-  for (int i = 0; i < MAX_PACKAGES_NO; ++i) {
+  for (uint64_t i = 0; i < MAX_PACKAGES_NO; ++i) {
     packages[i].data = new char[PSIZE + AUDIO_DATA + 1];
     memset(packages[i].data, 0, PSIZE + AUDIO_DATA + 1);
   }
@@ -143,7 +145,7 @@ void init(int argc, char** argv) {
  *                                                  CONTROLER                                                         *
  *--------------------------------------------------------------------------------------------------------------------*/
 void cinit() {
-  int val, res;
+  int val, res, flags;
   sockaddr_in self_address{};
 
   self_address.sin_family = AF_INET;
@@ -170,6 +172,9 @@ void cinit() {
     syserr("bind ctrl_sock");
   }
 
+  flags = fcntl(csock, F_GETFL, 0);
+  flags |= O_NONBLOCK;
+  fcntl(csock, F_SETFL, flags);
 }
 
 int cread_order(sockaddr_in& rec_addr, char* buff) {
@@ -181,7 +186,7 @@ int cread_order(sockaddr_in& rec_addr, char* buff) {
   rec_addr_len = sizeof(rec_addr);
 
   rec_bytes = recvfrom(csock, buff, BUF_SIZE, flags, (struct sockaddr *) &rec_addr, &rec_addr_len);
-  if (rec_bytes < 0) {
+  if (rec_bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
     std::cerr << "error on datagram from ctrl sock" << std::endl;
   }
 
@@ -206,7 +211,7 @@ void cperform_lookup_ord(struct sockaddr_in& rec_addr) {
   reply = "BOREWICZ_HERE " + MCAST_ADDR + " " + std::to_string(DATA_PORT) + " " + SNAME + "\n";
 
   snd_len = sendto(csock, reply.c_str(), reply.size(), flags, (const struct sockaddr *) &rec_addr, rec_addr_len);
-  if (snd_len != reply.size()) {
+  if (snd_len != (ssize_t) reply.size()) {
     std::cerr << "sendto lookup" << std::endl;
   }
 }
@@ -252,6 +257,7 @@ void controler() {
   sockaddr_in rec_addr{};
   int order;
   char buff[BUF_SIZE + 1];
+
   cinit();
 
   while (data_left) {
@@ -314,6 +320,7 @@ bool tread_from_stdin() {
   uint64_t tmp;
   int64_t pos;
   int c;
+  uint64_t i;
 
   tsock_mut.lock();
 
@@ -324,7 +331,7 @@ bool tread_from_stdin() {
   package.fbyte = 0; /* anyway we override the act data, which in
                         case of failure we don't want to retransmit */
 
-  for (int i = 0; i < PSIZE; ++i) {
+  for (i = 0; i < PSIZE; ++i) {
     c = getchar();
     if (c == EOF) {
       tsock_mut.unlock();
